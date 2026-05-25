@@ -1,6 +1,7 @@
 {
   "name": "garantia-worker",
   "version": "0.0.0",
+  "type": "module",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
@@ -12,5 +13,11 @@
     "@cloudflare/vitest-pool-workers": "^0.12.4",
     "vitest": "~3.2.0",
     "wrangler": "^4.94.0"
+  },
+  "dependencies": {
+    "pdf-parse": "^2.4.5",
+    "pdf2json": "^4.0.3",
+    "pdfjs-dist": "^5.7.284",
+    "xlsx": "^0.18.5"
   }
 }
