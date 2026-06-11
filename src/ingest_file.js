@@ -1,21 +1,23 @@
-// Ingesta de archivo individual
+// Ingesta de archivo individual — soporta PDF, Excel y DOCX
 import { basename, extname } from "path";
 import { createRequire } from "module";
 import * as XLSX from "xlsx";
+import mammoth from "mammoth";
 
 const require = createRequire(import.meta.url);
 const PDFParser = require("pdf2json");
 
 const ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
-const API_TOKEN = process.env.CF_API_TOKEN;
+const API_TOKEN  = process.env.CF_API_TOKEN;
 const INDEX_NAME = "garantia-index";
 
-// Genera un ID corto a partir del nombre del archivo
+// ── IDs ──────────────────────────────────────────────────────────────────────
 function makeId(fileName, chunk) {
   const short = fileName.replace(/[^a-zA-Z0-9]/g, "").slice(0, 40);
   return `${short}-${chunk}`;
 }
 
+// ── Parsers ───────────────────────────────────────────────────────────────────
 function parsePDF(filePath) {
   return new Promise((resolve, reject) => {
     const parser = new PDFParser(null, 1);
@@ -30,7 +32,7 @@ function parseExcel(filePath) {
   let text = "";
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1 });
     text += `\n## Hoja: ${sheetName}\n`;
     for (const row of rows) {
       const line = row.filter(Boolean).join(" | ");
@@ -40,8 +42,18 @@ function parseExcel(filePath) {
   return text;
 }
 
+// ── NUEVO: parser para .docx ──────────────────────────────────────────────────
+async function parseDocx(filePath) {
+  const result = await mammoth.extractRawText({ path: filePath });
+  if (result.messages.length > 0) {
+    result.messages.forEach((m) => console.warn("  ⚠️  mammoth:", m.message));
+  }
+  return result.value;
+}
+
+// ── Chunking ──────────────────────────────────────────────────────────────────
 function chunkText(text, chunkSize = 400, overlap = 50) {
-  const words = text.split(/\s+/);
+  const words  = text.split(/\s+/);
   const chunks = [];
   let i = 0;
   while (i < words.length) {
@@ -52,12 +64,16 @@ function chunkText(text, chunkSize = 400, overlap = 50) {
   return chunks;
 }
 
+// ── Cloudflare AI embedding ───────────────────────────────────────────────────
 async function getEmbedding(text) {
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/run/@cf/baai/bge-m3`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${API_TOKEN}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({ text }),
     }
   );
@@ -66,34 +82,60 @@ async function getEmbedding(text) {
   return data.result.data[0];
 }
 
+// ── Vectorize upsert ──────────────────────────────────────────────────────────
 async function upsertVectors(vectors) {
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/vectorize/v2/indexes/${INDEX_NAME}/upsert`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${API_TOKEN}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: `Bearer ${API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({ vectors }),
     }
   );
   return res.json();
 }
 
+// ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
   const filePath = process.argv[2];
-  if (!filePath) { console.error("Uso: node src/ingest_file.js <archivo>"); process.exit(1); }
-  if (!ACCOUNT_ID || !API_TOKEN) { console.error("❌ Faltan variables de entorno"); process.exit(1); }
+
+  if (!filePath) {
+    console.error("Uso: node src/ingest_file.mjs <archivo>");
+    console.error("     Soporta: .pdf  .xlsx  .xls  .docx");
+    process.exit(1);
+  }
+
+  if (!ACCOUNT_ID || !API_TOKEN) {
+    console.error("❌ Faltan variables de entorno: CF_ACCOUNT_ID y/o CF_API_TOKEN");
+    process.exit(1);
+  }
 
   const fileName = basename(filePath);
-  const ext = extname(filePath).toLowerCase();
+  const ext      = extname(filePath).toLowerCase();
 
   console.log(`\n📄 Procesando: ${fileName}`);
 
   let text = "";
-  if (ext === ".pdf") text = await parsePDF(filePath);
-  else if (ext === ".xlsx" || ext === ".xls") text = parseExcel(filePath);
-  else { console.error("❌ Formato no soportado"); process.exit(1); }
 
-  if (!text.trim()) { console.log("⚠️  Sin contenido"); process.exit(0); }
+  if (ext === ".pdf") {
+    text = await parsePDF(filePath);
+  } else if (ext === ".xlsx" || ext === ".xls") {
+    text = parseExcel(filePath);
+  } else if (ext === ".docx") {
+    text = await parseDocx(filePath);
+  } else {
+    console.error(`❌ Formato no soportado: ${ext}`);
+    console.error("   Formatos válidos: .pdf  .xlsx  .xls  .docx");
+    process.exit(1);
+  }
+
+  if (!text.trim()) {
+    console.log("⚠️  Sin contenido extraíble en el archivo.");
+    process.exit(0);
+  }
 
   const chunks = chunkText(text);
   console.log(`🔪 Fragmentos: ${chunks.length}`);
@@ -103,8 +145,8 @@ async function main() {
     process.stdout.write(`  ⚙️  Embedding ${i + 1}/${chunks.length}...\r`);
     const embedding = await getEmbedding(chunks[i]);
     vectors.push({
-      id: makeId(fileName, i),
-      values: embedding,
+      id:       makeId(fileName, i),
+      values:   embedding,
       metadata: { source: fileName, text: chunks[i], chunk: i },
     });
   }
@@ -112,7 +154,10 @@ async function main() {
   const batchSize = 100;
   for (let i = 0; i < vectors.length; i += batchSize) {
     const result = await upsertVectors(vectors.slice(i, i + batchSize));
-    if (!result.success) { console.error("\n❌ Error:", result.errors); process.exit(1); }
+    if (!result.success) {
+      console.error("\n❌ Error al indexar:", result.errors);
+      process.exit(1);
+    }
   }
 
   console.log(`\n✅ ${chunks.length} fragmentos indexados de ${fileName}\n`);
