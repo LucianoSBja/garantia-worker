@@ -1,61 +1,17 @@
-const SYSTEM_PROMPT = `Sos GarantIA, el asistente de garantías del taller Derka y Vargas, sucursal Sáenz Peña.
-Tu función es ayudar a técnicos y asesores de servicio a resolver dudas sobre garantías Toyota de forma rápida, clara y confiable.
+const SYSTEM_PROMPT = `Sos GarantIA, asistente de garantías Toyota del taller Derka y Vargas, Sáenz Peña.
 
-## Tu personalidad
-- Amigable, directo y usás lenguaje simple — hablás como un compañero que sabe mucho
-- Nunca sos genérico: siempre citás el documento, boletín o modelo específico
-- Si encontrás información parcial, la compartís y aclarás qué falta
+## REGLA PRINCIPAL
+ANTES de dar cualquier información, siempre preguntá UNA sola cosa para entender el caso:
+- Si no sabés el modelo → preguntá el modelo y año
+- Si no sabés el problema → preguntá el síntoma
+- Si no sabés el kilometraje → preguntá kilometraje o fecha de entrega
+Solo cuando tenés modelo + síntoma + kilometraje, respondé con los detalles.
 
-## Cómo responder
-
-### Cuando tenés información en el contexto:
-1. Respondé directamente sin preámbulos innecesarios
-2. Citá siempre la fuente: "[Fuente: NOMBRE_DOCUMENTO]" al final de cada dato importante
-3. Mencioná el modelo de vehículo y número de boletín cuando estén disponibles
-4. Usá listas numeradas para procedimientos paso a paso
-5. Usá listas con guiones para coberturas o exclusiones
-6. Al final agregá: "📄 Basado en: NOMBRE_DOCUMENTO"
-
-### Cuando la información es parcial:
-- Compartí lo que encontraste y aclará qué no pudiste confirmar
-- Ejemplo: "Encontré información sobre X, pero no tengo datos sobre Y. Para Y te recomiendo consultar con el responsable."
-
-### Cuando no hay información:
-- Respondé exactamente: "No encontré información sobre esto en la base de conocimiento. Te recomiendo consultar directamente con el responsable de garantías."
-- No inventes, no supongas, no extrapoles
-
-## Reglas estrictas
-- NUNCA inventes coberturas, plazos ni procedimientos
-- NUNCA respondas preguntas fuera del área de garantías y posventa Toyota
-- NUNCA omitas la fuente cuando tenés datos concretos
-- Si el contexto tiene contradicciones entre documentos, mencionálo: "El documento A dice X, pero el documento B dice Y"
-
-## Formato de respuesta ideal
-
-**[Respuesta directa a la pregunta]**
-
-[Desarrollo con detalles, pasos o coberturas]
-
-📄 Basado en: [nombre del documento o boletín]
-
----
-
-Ejemplos de buenas respuestas:
-
-Pregunta: ¿Qué cubre la garantía de baterías?
-Respuesta: La garantía de Toyota cubre la batería de arranque y la batería de carga auxiliar siempre que sean nuevas o tengan menos de 6 meses de uso. El cable de alimentación debe tener una sección mínima de 22 mm². Importante: la garantía NO cubre la batería auxiliar en vehículos con sistema ECB.
-📄 Basado en: APLICACION DE GARANTIA EN BATERIAS.pdf
-
-Pregunta: ¿Cuál es el procedimiento para la ECU de transmisión del Land Cruiser?
-Respuesta: Según el boletín ABI-517, el procedimiento es:
-1. Confeccionar el RDG con los siguientes datos:
-   - Reparación: SSC Repro. de ECU de Transmisión
-   - Causa: Programación en el módulo
-   - Problema: Error de comunicación T2 00 T1 00
-   - Tiempo: 0.8
-   - Operación: 6GG01A
-   - Parte Causante: 89530-60680
-📄 Basado en: ABI-517`;
+## Al responder
+- Usá solo la información del contexto provisto
+- No inventes coberturas ni procedimientos
+- Terminá siempre con: 📄 Basado en: [nombre del archivo]
+- Si no hay información: "No encontré datos sobre esto. Consultá con el responsable de garantías."`;
 
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
@@ -89,9 +45,10 @@ export default {
 	},
 };
 
-async function handleChat(request, env) {
+export async function handleChat(request, env) {
 	try {
-		const { message } = await request.json();
+		const { message, history = [] } = await request.json();
+		const isFirstMessage = history.length === 0;
 
 		if (!message || message.trim() === '') {
 			return Response.json({ error: 'Mensaje vacío' }, { status: 400, headers: CORS_HEADERS });
@@ -99,9 +56,10 @@ async function handleChat(request, env) {
 
 		// 1. Revisar caché KV
 		const cacheKey = `chat:${message.trim().toLowerCase().slice(0, 100)}`;
-		const cached = await env.garantia_cache.get(cacheKey);
-		if (cached) {
-			return Response.json({ reply: cached, cached: true }, { headers: CORS_HEADERS });
+
+		if (isFirstMessage) {
+			const cached = await env.garantia_cache.get(cacheKey);
+			if (cached) return Response.json({ reply: cached, cached: true }, { headers: CORS_HEADERS });
 		}
 
 		// 2. Generar embedding con Workers AI
@@ -116,28 +74,28 @@ async function handleChat(request, env) {
 			returnMetadata: 'all',
 		});
 
-		console.log(
-			'Vectorize matches:',
-			JSON.stringify((vectorResults.matches || []).map((m) => ({ score: m.score, source: m.metadata?.source }))),
-		);
+		const matches = (vectorResults.matches || []).filter((m) => m.score > 0.55);
 
-		// 4. Armar contexto
-		let context = '';
-		if (vectorResults.matches && vectorResults.matches.length > 0) {
-			context = vectorResults.matches.map((m) => `[${m.metadata?.source || 'Documento'}]\n${m.metadata?.text || ''}`).join('\n\n');
-		}
+        console.log(
+            'Vectorize matches:',
+            JSON.stringify((vectorResults.matches || []).map((m) => ({ score: m.score, source: m.metadata?.source }))),
+        );
+
+        // 4. Armar contexto — solo con matches relevantes (score > 0.55)
+        let context = '';
+        if (matches.length > 0) {
+            context = matches.map((m) => `[${m.metadata?.source || 'Documento'}]\n${m.metadata?.text || ''}`).join('\n\n');
+        }
 
 		// 5. Armar prompt para Llama
 		const userPrompt = context
-			? `[CONTEXTO DE DOCUMENTOS]\n${context}\n[FIN DEL CONTEXTO]\n\nPregunta: ${message}`
-			: `Pregunta: ${message}\n\nNota: No se encontraron documentos relevantes en la base de conocimiento.`;
+			? `Contexto de documentos:\n${context}\n\n---\nPregunta: ${message}\n\nRecordá: si te falta modelo, síntoma o kilometraje, hacé UNA sola pregunta antes de responder.`
+			: `Pregunta: ${message}\n\nNo hay documentos relevantes. Respondé: "No encontré información sobre esto. Consultá con el responsable de garantías."`;
 
 		// 6. Llamar a Llama 3 via Workers AI
-		const llmResponse = await env.AI.run('@cf/meta/llama-3.2-1b-instruct', {
-			messages: [
-				{ role: 'system', content: SYSTEM_PROMPT },
-				{ role: 'user', content: userPrompt },
-			],
+		const messages = [...history, { role: 'user', content: userPrompt }];
+		const llmResponse = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
+			messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
 			max_tokens: 512,
 			temperature: 0.2,
 		});
@@ -145,7 +103,9 @@ async function handleChat(request, env) {
 		const reply = llmResponse?.response || 'No pude generar una respuesta. Intentá de nuevo.';
 
 		// 7. Guardar en caché por 1 hora
-		await env.garantia_cache.put(cacheKey, reply, { expirationTtl: 3600 });
+		if (isFirstMessage) {
+			await env.garantia_cache.put(cacheKey, reply, { expirationTtl: 3600 });
+		}
 
 		return Response.json({ reply, cached: false }, { headers: CORS_HEADERS });
 	} catch (err) {
@@ -161,6 +121,7 @@ function chatHTML() {
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>GarantIA — Derka y Vargas</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -503,6 +464,57 @@ function chatHTML() {
       .cards-grid { grid-template-columns: repeat(4, 1fr); }
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
+
+    .bubble.bot p { margin: 0 0 5px; }
+    .bubble.bot p:last-child { margin-bottom: 0; }
+
+    /* Listas sin espacio de párrafo entre items */
+    .bubble.bot ul, .bubble.bot ol {
+    padding-left: 16px;
+    margin: 4px 0 6px;
+    }
+    .bubble.bot li {
+    margin-bottom: 2px;
+    line-height: 1.45;
+    }
+    /* Esto es clave: marked envuelve cada item en <p> cuando hay líneas en blanco */
+    .bubble.bot li p {
+    margin: 0;
+    }
+
+    .bubble.bot strong { font-weight: 700; }
+
+    /* Separación entre secciones */
+    .bubble.bot h1, .bubble.bot h2, .bubble.bot h3 {
+    font-size: .88rem;
+    font-weight: 700;
+    margin: 8px 0 4px;
+    color: var(--black);
+    }
+
+    .bubble.bot code {
+    background: #f0f0f0;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: .78rem;
+    font-family: monospace;
+    }
+
+    /* Línea del "Basado en:" con color diferenciado */
+    .bubble.bot p:last-child:not(:first-child) {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--gray-border);
+    font-size: .75rem;
+    color: var(--gray-text);
+    }
+
+    /* Separador horizontal */
+    .bubble.bot hr {
+    border: none;
+    border-top: 1px solid var(--gray-border);
+    margin: 8px 0;
+    }
   </style>
 </head>
 <body>
@@ -578,19 +590,7 @@ function chatHTML() {
             <span class="card-sub">Land Cruiser ECU</span>
           </button>
         </div>
-
-        <p class="section-label" style="margin-top:14px">¿Con qué rol consultás?</p>
         <div class="cards-grid role-grid">
-          <button class="role-card" onclick="sendCard('Actuar como asesor de garantías Toyota.')">
-            <span class="card-icon">🧑‍💼</span>
-            <span class="card-label">Soy Asesor</span>
-            <span class="card-sub">Asistencia de posventa</span>
-          </button>
-          <button class="role-card" onclick="sendCard('Actuar como técnico especialista de garantías Toyota.')">
-            <span class="card-icon">🔧</span>
-            <span class="card-label">Soy Técnico</span>
-            <span class="card-sub">Diagnóstico y reparación</span>
-          </button>
         </div>
 
       </div><!-- /homeScreen -->
@@ -624,6 +624,7 @@ function chatHTML() {
     const backBtn = document.getElementById('backBtn');
     const homeScreen = document.getElementById('homeScreen');
     let inChat = false;
+    let conversationHistory = [];
 
     function autoResize(el) {
       el.style.height = 'auto';
@@ -652,6 +653,7 @@ function chatHTML() {
 
     /* Vuelve a la pantalla de inicio */
     function goHome() {
+      conversationHistory = [];
       inChat = false;
       homeScreen.style.display = 'block';
       backBtn.classList.remove('visible');
@@ -663,30 +665,48 @@ function chatHTML() {
     }
 
     function addMsg(text, role, cached = false) {
-      const row    = document.createElement('div');
-      row.className = 'msg-row ' + role;
+        if (role === 'user') conversationHistory.push({ role: 'user', content: text });
+        if (role === 'bot')  conversationHistory.push({ role: 'assistant', content: text });
 
-      const av = document.createElement('div');
-      av.className = 'avatar ' + (role === 'user' ? 'user-av' : '');
-      av.textContent = role === 'user' ? 'TÚ' : 'G';
+        const row = document.createElement('div');
+        row.className = 'msg-row ' + role;
 
-      const meta   = document.createElement('div');
-      meta.className = 'msg-meta';
+        const av = document.createElement('div');
+        av.className = 'avatar ' + (role === 'user' ? 'user-av' : '');
+        av.textContent = role === 'user' ? 'TÚ' : 'G';
 
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble ' + role + (cached ? ' cached' : '');
-      bubble.textContent = text;
+        const meta = document.createElement('div');
+        meta.className = 'msg-meta';
 
-      const time   = document.createElement('div');
-      time.className = 'msg-time';
-      time.textContent = now();
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble ' + role + (cached ? ' cached' : '');
 
-      meta.appendChild(bubble);
-      meta.appendChild(time);
-      row.appendChild(av);
-      row.appendChild(meta);
-      chat.appendChild(row);
-      chat.scrollTop = chat.scrollHeight;
+        if (role === 'bot') {
+            try {
+            // Configurar marked para mejor compatibilidad
+            marked.setOptions({
+                breaks: true,    // saltos de línea simples → <br>
+                gfm: true,       // GitHub Flavored Markdown
+            });
+            bubble.innerHTML = marked.parse(String(text || ''));
+            } catch (e) {
+            // Fallback: mostrar como texto plano si marked falla
+            bubble.textContent = text;
+            }
+        } else {
+            bubble.textContent = text;
+        }
+
+        const time = document.createElement('div');
+        time.className = 'msg-time';
+        time.textContent = now();
+
+        meta.appendChild(bubble);
+        meta.appendChild(time);
+        row.appendChild(av);
+        row.appendChild(meta);
+        chat.appendChild(row);
+        chat.scrollTop = chat.scrollHeight;
     }
 
     function showTyping() {
@@ -726,6 +746,8 @@ function chatHTML() {
 
       enterChat();
 
+      const historySnapshot = conversationHistory.slice(-10);
+
       input.value = '';
       input.style.height = 'auto';
       btn.disabled = true;
@@ -733,10 +755,13 @@ function chatHTML() {
       showTyping();
 
       try {
-        const res  = await fetch('/chat', {
+        const res = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msg }),
+          body: JSON.stringify({
+            message: msg,
+            history: historySnapshot,
+          }),
         });
         const data = await res.json();
         removeTyping();
