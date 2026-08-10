@@ -9,7 +9,12 @@ const PDFParser = require("pdf2json");
 
 const ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
 const API_TOKEN  = process.env.CF_API_TOKEN;
-const INDEX_NAME = "garantia-index";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const INDEX_NAME = "garantia-index-gemini";
+
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_EMBED_MODEL = "gemini-embedding-001";
+const GEMINI_EMBED_DIMENSIONS = 768;
 
 // ── IDs ──────────────────────────────────────────────────────────────────────
 function makeId(fileName, chunk) {
@@ -67,19 +72,23 @@ function chunkText(text, chunkSize = 400, overlap = 50) {
 // ── Cloudflare AI embedding ───────────────────────────────────────────────────
 async function getEmbedding(text) {
   const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/run/@cf/baai/bge-m3`,
+    `${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`,
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${API_TOKEN}`,
+        "x-goog-api-key": GOOGLE_API_KEY,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({
+        content: { parts: [{ text }] },
+        taskType: "RETRIEVAL_DOCUMENT",
+        outputDimensionality: GEMINI_EMBED_DIMENSIONS,
+      }),
     }
   );
   const data = await res.json();
-  if (!data.success) throw new Error("Error embedding: " + JSON.stringify(data.errors));
-  return data.result.data[0];
+  if (!data.embedding?.values) throw new Error("Error embedding: " + JSON.stringify(data));
+  return data.embedding.values;
 }
 
 // ── Vectorize upsert ──────────────────────────────────────────────────────────
@@ -108,8 +117,8 @@ async function main() {
     process.exit(1);
   }
 
-  if (!ACCOUNT_ID || !API_TOKEN) {
-    console.error("❌ Faltan variables de entorno: CF_ACCOUNT_ID y/o CF_API_TOKEN");
+  if (!ACCOUNT_ID || !API_TOKEN || !GOOGLE_API_KEY) {
+    console.error("❌ Faltan variables de entorno: CF_ACCOUNT_ID, CF_API_TOKEN y/o GOOGLE_API_KEY");
     process.exit(1);
   }
 

@@ -30,20 +30,20 @@ Técnico / Asesor
          │ pregunta
          ▼
 ┌─────────────────┐
-│  Embedding      │  @cf/baai/bge-m3 (multilingüe)
-│  de la consulta │
+│  Embedding      │  Gemini gemini-embedding-001 (768 dims)
+│  de la consulta │  taskType: RETRIEVAL_QUERY
 └────────┬────────┘
          │ vector
          ▼
 ┌─────────────────┐
-│  Vectorize      │  Búsqueda semántica en 742+ fragmentos
+│  Vectorize      │  Búsqueda semántica (topK 5, score > 0.55)
 │  (RAG)          │
 └────────┬────────┘
          │ contexto relevante
          ▼
 ┌─────────────────┐
-│  Llama 3.1 8B   │  @cf/meta/llama-3.1-8b-instruct
-│  (LLM)          │
+│  Gemini         │  gemini-3.5-flash-lite
+│  (LLM)          │  temperature 0.2
 └────────┬────────┘
          │ respuesta citada
          ▼
@@ -52,17 +52,23 @@ Técnico / Asesor
 └─────────────────┘
 ```
  
-**Servicios utilizados (todos en plan gratuito de Cloudflare):**
+**Servicios utilizados:**
  
 | Servicio | Uso | Límite gratuito |
 |---|---|---|
 | Cloudflare Workers | Lógica principal / chat web | 100.000 req/día |
 | Cloudflare Vectorize | Base vectorial RAG | 30M vectores |
-| Workers AI | Embeddings + LLM (Llama 3.1) | 10.000 neurons/día |
+| Google Gemini API | Embeddings + LLM | Según cuota de Google AI Studio |
 | Cloudflare R2 | Almacenamiento de documentos | 10 GB |
 | Cloudflare KV | Caché de respuestas | 100.000 lecturas/día |
  
-**Costo total: $0**
+### Embeddings asimétricos
+ 
+La ingesta y la consulta usan **task types distintos** del mismo modelo: `RETRIEVAL_DOCUMENT` al indexar los fragmentos y `RETRIEVAL_QUERY` al embeber la pregunta del técnico. Gemini optimiza cada lado por separado, lo que mejora el recall frente a un embedding simétrico. **No son intercambiables**: usar el mismo task type en ambos lados degrada la búsqueda.
+ 
+### Caché
+ 
+El caché KV se consulta y se escribe **solo cuando el historial está vacío** (primer mensaje de la conversación). Las repreguntas dependen del contexto previo, así que cachearlas por texto devolvería respuestas incorrectas.
  
 ---
  
@@ -71,12 +77,14 @@ Técnico / Asesor
 ```
 garantia-worker/
 ├── src/
-│   ├── index.js          # Worker principal (chat + RAG + LLM)
-│   ├── ingest.js         # Ingesta masiva de carpetas (PDF + Excel)
+│   ├── index.js          # Worker principal (chat + RAG + LLM + UI)
+│   ├── ingest.js         # Ingesta masiva de carpetas (PDF + Excel + DOCX)
 │   └── ingest_file.js    # Ingesta de archivo individual
+├── test/unit/            # Tests unitarios (vitest, sin credenciales)
 ├── docs/                 # Documentos de garantías (no incluido en git)
 ├── wrangler.jsonc        # Configuración de Cloudflare
-├── .env                  # Variables de entorno (no incluido en git)
+├── .env                  # Credenciales para los scripts de ingesta (no incluido en git)
+├── .dev.vars             # Secrets para wrangler dev (no incluido en git)
 ├── package.json
 └── README.md
 ```
@@ -90,6 +98,7 @@ garantia-worker/
 - Node.js v18+
 - pnpm
 - Cuenta en Cloudflare (gratuita)
+- API key de [Google AI Studio](https://aistudio.google.com/apikey)
 ### 1. Clonar e instalar
  
 ```bash
@@ -101,17 +110,33 @@ pnpm approve-builds  # aprobar esbuild y workerd
  
 ### 2. Configurar variables de entorno
  
-Crear el archivo `.env`:
+Hay tres lugares distintos según quién lea el secret:
+ 
+**`.env`** — lo usan los scripts de ingesta que corren en Node:
  
 ```env
 CLOUDFLARE_ACCOUNT_ID="tu-account-id"
 CLOUDFLARE_API_TOKEN="tu-api-token"
 CF_ACCOUNT_ID="tu-account-id"
 CF_API_TOKEN="tu-api-token"
+GOOGLE_API_KEY="tu-api-key-de-google-ai-studio"
+```
+ 
+**`.dev.vars`** — lo lee `wrangler dev`:
+ 
+```env
+GOOGLE_API_KEY=tu-api-key-de-google-ai-studio
+```
+ 
+**Producción** — el Worker desplegado:
+ 
+```bash
+wrangler secret put GOOGLE_API_KEY
 ```
  
 Obtener el `ACCOUNT_ID` desde el dashboard de Cloudflare.
-Crear el `API_TOKEN` en **My Profile → API Tokens → Create Token** con permisos de Workers, Vectorize, R2, KV y AI.
+Crear el `API_TOKEN` en **My Profile → API Tokens → Create Token** con permisos de Workers, Vectorize, R2 y KV.
+Crear la API key de Gemini en **Google AI Studio → Get API key**.
  
 ### 3. Crear los recursos en Cloudflare
  
@@ -119,8 +144,8 @@ Crear el `API_TOKEN` en **My Profile → API Tokens → Create Token** con permi
 # Autenticarse
 wrangler login
  
-# Crear índice vectorial (1024 dimensiones para bge-m3)
-wrangler vectorize create garantia-index --dimensions=1024 --metric=cosine
+# Crear índice vectorial (768 dimensiones para gemini-embedding-001)
+wrangler vectorize create garantia-index-gemini --dimensions=768 --metric=cosine
  
 # Crear bucket R2 para documentos
 wrangler r2 bucket create garantia-docs
@@ -131,9 +156,11 @@ wrangler kv namespace create garantia-cache
  
 Copiar el ID del KV al `wrangler.jsonc`.
  
+> Las 768 dimensiones están atadas al modelo de embeddings. Vectorize no permite cambiarlas sobre un índice existente: si se cambia de modelo, hay que crear un índice nuevo y re-indexar todo.
+ 
 ### 4. Indexar documentos
  
-Poner los PDFs y Excel en la carpeta `docs/` (puede tener subcarpetas) y ejecutar:
+Poner los PDFs, Excel y Word en la carpeta `docs/` (puede tener subcarpetas) y ejecutar:
  
 ```bash
 # Cargar variables
@@ -146,6 +173,10 @@ node src/ingest.js ./docs
 node src/ingest_file.js docs/mi-documento.pdf
 ```
  
+Los IDs de los vectores son determinísticos (`archivo-fragmento`), así que re-indexar el mismo documento sobreescribe en lugar de duplicar.
+ 
+> El loop de embeddings no tiene reintentos ni checkpoint: si la API de Gemini falla a mitad de una corrida larga, se corta toda la ingesta y hay que volver a empezar.
+ 
 ### 5. Desarrollo local
  
 ```bash
@@ -153,6 +184,16 @@ wrangler dev --remote
 ```
  
 Abrir `http://localhost:8787` en el navegador.
+ 
+El flag `--remote` es obligatorio: Vectorize no se emula localmente y `wrangler dev` a secas falla con `Binding VECTORIZE needs to be run remotely`. Requiere `wrangler login` (sesión OAuth interactiva — un `CLOUDFLARE_API_TOKEN` en el entorno no alcanza).
+ 
+### 5b. Tests
+ 
+```bash
+pnpm test
+```
+ 
+Corren en Node con `fetch` y los bindings mockeados, sin necesidad de credenciales ni del runtime de Workers.
  
 ### 6. Deploy a producción
  
@@ -183,6 +224,7 @@ Vectorize tarda 1-2 minutos en procesar los nuevos vectores.
 |---|---|
 | PDF (texto) | ✅ Completo |
 | Excel (.xlsx / .xls) | ✅ Completo |
+| Word (.docx) | ✅ Completo |
 | PDF (escaneado / imagen) | ❌ No soportado (requiere OCR) |
  
 ---
@@ -190,13 +232,15 @@ Vectorize tarda 1-2 minutos en procesar los nuevos vectores.
 ## Stack tecnológico
  
 - **Runtime:** Cloudflare Workers (JavaScript ESM)
-- **LLM:** Llama 3.1 8B Instruct (`@cf/meta/llama-3.1-8b-instruct`)
-- **Embeddings:** BGE-M3 multilingüe (`@cf/baai/bge-m3`)
+- **LLM:** Gemini 3.5 Flash Lite (`gemini-3.5-flash-lite`)
+- **Embeddings:** Gemini (`gemini-embedding-001`, 768 dimensiones)
 - **Base vectorial:** Cloudflare Vectorize
 - **Almacenamiento:** Cloudflare R2
 - **Caché:** Cloudflare KV
 - **PDF parser:** pdf2json
 - **Excel parser:** xlsx (SheetJS)
+- **Word parser:** mammoth
+- **Tests:** vitest
 ---
  
 ## Prompt del sistema
@@ -218,4 +262,4 @@ GarantIA está configurada para:
  
 ---
  
-*Desarrollado con Cloudflare Workers + Workers AI — Costo de infraestructura: $0/mes*
+*Desarrollado con Cloudflare Workers + Google Gemini*
