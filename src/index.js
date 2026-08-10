@@ -19,6 +19,57 @@ const CORS_HEADERS = {
 	'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_EMBED_MODEL = 'gemini-embedding-001';
+const GEMINI_EMBED_DIMENSIONS = 768;
+const GEMINI_CHAT_MODEL = 'gemini-3.5-flash-lite';
+
+async function embedText(env, text, taskType) {
+	const res = await fetch(`${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			'x-goog-api-key': env.GOOGLE_API_KEY,
+		},
+		body: JSON.stringify({
+			content: { parts: [{ text }] },
+			taskType,
+			outputDimensionality: GEMINI_EMBED_DIMENSIONS,
+		}),
+	});
+	const data = await res.json();
+	if (!data.embedding?.values) {
+		throw new Error('Error generando embedding: ' + JSON.stringify(data));
+	}
+	return data.embedding.values;
+}
+
+function toGeminiRole(role) {
+	return role === 'assistant' ? 'model' : 'user';
+}
+
+async function generateReply(env, systemPrompt, history, userPrompt) {
+	const contents = [
+		...history.map((m) => ({ role: toGeminiRole(m.role), parts: [{ text: m.content }] })),
+		{ role: 'user', parts: [{ text: userPrompt }] },
+	];
+
+	const res = await fetch(`${GEMINI_API_BASE}/${GEMINI_CHAT_MODEL}:generateContent`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			'x-goog-api-key': env.GOOGLE_API_KEY,
+		},
+		body: JSON.stringify({
+			systemInstruction: { parts: [{ text: systemPrompt }] },
+			contents,
+			generationConfig: { temperature: 0.2, maxOutputTokens: 512 },
+		}),
+	});
+	const data = await res.json();
+	return data?.candidates?.[0]?.content?.parts?.[0]?.text;
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		if (request.method === 'OPTIONS') {
@@ -62,11 +113,8 @@ export async function handleChat(request, env) {
 			if (cached) return Response.json({ reply: cached, cached: true }, { headers: CORS_HEADERS });
 		}
 
-		// 2. Generar embedding con Workers AI
-		const embeddingResponse = await env.AI.run('@cf/baai/bge-m3', {
-			text: message,
-		});
-		const embedding = embeddingResponse.data[0];
+		// 2. Generar embedding con Gemini
+		const embedding = await embedText(env, message, 'RETRIEVAL_QUERY');
 
 		// 3. Buscar en Vectorize
 		const vectorResults = await env.VECTORIZE.query(embedding, {
@@ -92,15 +140,8 @@ export async function handleChat(request, env) {
 			? `Contexto de documentos:\n${context}\n\n---\nPregunta: ${message}\n\nRecordá: si te falta modelo, síntoma o kilometraje, hacé UNA sola pregunta antes de responder.`
 			: `Pregunta: ${message}\n\nNo hay documentos relevantes. Respondé: "No encontré información sobre esto. Consultá con el responsable de garantías."`;
 
-		// 6. Llamar a Llama 3 via Workers AI
-		const messages = [...history, { role: 'user', content: userPrompt }];
-		const llmResponse = await env.AI.run('@cf/meta/llama-3.2-3b-instruct', {
-			messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
-			max_tokens: 512,
-			temperature: 0.2,
-		});
-
-		const reply = llmResponse?.response || 'No pude generar una respuesta. Intentá de nuevo.';
+		// 6. Llamar a Gemini
+		const reply = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
 
 		// 7. Guardar en caché por 1 hora
 		if (isFirstMessage) {

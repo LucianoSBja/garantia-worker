@@ -10,13 +10,10 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"ai": {
-		"binding": "AI"
-	},
 	"vectorize": [
 		{
 			"binding": "VECTORIZE",
-			"index_name": "garantia-index"
+			"index_name": "garantia-index-gemini"
 		}
 	],
 	"r2_buckets": [
