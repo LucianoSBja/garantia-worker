@@ -14,7 +14,7 @@ const API_TOKEN = process.env.CF_API_TOKEN;
 const KV_NAMESPACE_ID = process.env.CF_KV_NAMESPACE_ID || 'd1f39512c3204c818120f62cff06e8d4';
 
 const CARPETA_DRIVE = 'GarantIA - Documentos';
-const EXTENSIONES = ['.pdf', '.xlsx', '.xls', '.docx'];
+const EXTENSIONES = ['.pdf', '.xlsx', '.xls', '.docx', '.pptx'];
 
 // El Worker lee esta clave para resolver el link de cada documento citado.
 const KV_KEY = 'docs:urls';
@@ -24,6 +24,7 @@ const MIME_POR_EXTENSION = {
 	'.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 	'.xls': 'application/vnd.ms-excel',
 	'.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+	'.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 };
 
 const REINTENTOS_MAX = 4;

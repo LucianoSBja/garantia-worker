@@ -4,6 +4,7 @@ import { basename, extname } from "path";
 import { createRequire } from "module";
 import * as XLSX from "xlsx";
 import mammoth from "mammoth";
+import JSZip from "jszip";
 
 const require = createRequire(import.meta.url);
 const PDFParser = require("pdf2json");
@@ -86,6 +87,25 @@ async function parseDocx(filePath) {
   return result.value;
 }
 
+// Un .pptx es un ZIP con un XML por diapositiva. El texto vive en los <a:t>, así
+// que alcanza con recorrer las partes en orden y juntarlos. Se incluyen las notas
+// del orador: en los boletines técnicos suelen traer el desarrollo del caso.
+async function parsePptx(filePath) {
+  const zip = await JSZip.loadAsync(readFileSync(filePath));
+  const numero = (n) => Number(n.match(/(\d+)\.xml$/)[1]);
+  const partes = Object.keys(zip.files)
+    .filter((n) => /^ppt\/(slides|notesSlides)\/[a-zA-Z]+\d+\.xml$/.test(n))
+    .sort((a, b) => numero(a) - numero(b));
+
+  let text = "";
+  for (const parte of partes) {
+    const xml = await zip.file(parte).async("string");
+    const frases = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
+    if (frases.length > 0) text += frases.join(" ") + "\n";
+  }
+  return text;
+}
+
 // ── Chunking ──────────────────────────────────────────────────────────────────
 function chunkText(text, chunkSize = 400, overlap = 50) {
   const words  = text.split(/\s+/);
@@ -157,7 +177,7 @@ async function main() {
 
   if (!filePath) {
     console.error("Uso: node src/ingest_file.mjs <archivo>");
-    console.error("     Soporta: .pdf  .xlsx  .xls  .docx");
+    console.error("     Soporta: .pdf  .xlsx  .xls  .docx  .pptx");
     process.exit(1);
   }
 
@@ -179,9 +199,11 @@ async function main() {
     text = parseExcel(filePath);
   } else if (ext === ".docx") {
     text = await parseDocx(filePath);
+  } else if (ext === ".pptx") {
+    text = await parsePptx(filePath);
   } else {
     console.error(`❌ Formato no soportado: ${ext}`);
-    console.error("   Formatos válidos: .pdf  .xlsx  .xls  .docx");
+    console.error("   Formatos válidos: .pdf  .xlsx  .xls  .docx  .pptx");
     process.exit(1);
   }
 

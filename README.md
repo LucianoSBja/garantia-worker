@@ -83,7 +83,7 @@ La contrapartida es que GarantIA **no puede responder** "¿el chasis X entra en 
 garantia-worker/
 ├── src/
 │   ├── index.js          # Worker principal (chat + RAG + LLM + UI)
-│   ├── ingest.js         # Ingesta masiva de carpetas (PDF + Excel + DOCX)
+│   ├── ingest.js         # Ingesta masiva de carpetas (PDF + Excel + Word + PowerPoint)
 │   ├── ingest_file.js    # Ingesta de archivo individual
 │   ├── google_auth.js    # Autorización OAuth de Google Drive (se corre una vez)
 │   └── drive_upload.js   # Sube los documentos a Drive y publica el mapa de links
@@ -169,7 +169,7 @@ Copiar el ID del KV al `wrangler.jsonc`.
  
 ### 4. Indexar documentos
  
-Poner los PDFs, Excel y Word en la carpeta `docs/` (puede tener subcarpetas) y ejecutar:
+Poner los PDFs, Excel, Word y PowerPoint en la carpeta `docs/` (puede tener subcarpetas) y ejecutar:
  
 ```bash
 # Cargar variables
@@ -251,6 +251,7 @@ Vectorize tarda 1-2 minutos en procesar los nuevos vectores.
 | PDF (texto) | ✅ Completo |
 | Excel (.xlsx / .xls) | ✅ Completo |
 | Word (.docx) | ✅ Completo |
+| PowerPoint (.pptx) | ✅ Texto de diapositivas y notas |
 | PDF (escaneado / imagen) | ❌ No soportado (requiere OCR) |
  
 ---
@@ -265,6 +266,7 @@ Vectorize tarda 1-2 minutos en procesar los nuevos vectores.
 - **PDF parser:** pdf2json
 - **Excel parser:** xlsx (SheetJS)
 - **Word parser:** mammoth
+- **PowerPoint parser:** jszip (texto del XML de cada diapositiva)
 - **Tests:** vitest
 ---
  

@@ -6,6 +6,7 @@ import { basename, extname, join } from "path";
 import { createRequire } from "module";
 import * as XLSX from "xlsx";
 import mammoth from "mammoth";
+import JSZip from "jszip";
 
 const require = createRequire(import.meta.url);
 const PDFParser = require("pdf2json");
@@ -82,6 +83,25 @@ async function parseDocx(filePath) {
   return result.value;
 }
 
+// Un .pptx es un ZIP con un XML por diapositiva. El texto vive en los <a:t>, así
+// que alcanza con recorrer las partes en orden y juntarlos. Se incluyen las notas
+// del orador: en los boletines técnicos suelen traer el desarrollo del caso.
+async function parsePptx(filePath) {
+  const zip = await JSZip.loadAsync(readFileSync(filePath));
+  const numero = (n) => Number(n.match(/(\d+)\.xml$/)[1]);
+  const partes = Object.keys(zip.files)
+    .filter((n) => /^ppt\/(slides|notesSlides)\/[a-zA-Z]+\d+\.xml$/.test(n))
+    .sort((a, b) => numero(a) - numero(b));
+
+  let text = "";
+  for (const parte of partes) {
+    const xml = await zip.file(parte).async("string");
+    const frases = [...xml.matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((m) => m[1]);
+    if (frases.length > 0) text += frases.join(" ") + "\n";
+  }
+  return text;
+}
+
 // ── Chunker ──────────────────────────────────────────────
 
 function chunkText(text, chunkSize = 400, overlap = 50) {
@@ -156,6 +176,8 @@ async function ingestFile(filePath) {
       text = parseExcel(filePath);
     } else if (ext === ".docx") {
       text = await parseDocx(filePath);
+    } else if (ext === ".pptx") {
+      text = await parsePptx(filePath);
     }
   } catch (err) {
     console.error(`  ❌ Error leyendo ${fileName}:`, err.message);
@@ -219,7 +241,7 @@ function marcarHecho(filePath) {
 
 // ── Buscar archivos ──────────────────────────────────────
 
-function findFiles(dir, exts = [".pdf", ".xlsx", ".xls", ".docx"]) {
+function findFiles(dir, exts = [".pdf", ".xlsx", ".xls", ".docx", ".pptx"]) {
   let results = [];
   for (const entry of readdirSync(dir)) {
     const fullPath = join(dir, entry);
@@ -247,7 +269,7 @@ async function main() {
 
   if (files.length === 0) {
     console.error(`❌ No se encontraron archivos en: ${target}`);
-    console.error("   Formatos válidos: .pdf  .xlsx  .xls  .docx");
+    console.error("   Formatos válidos: .pdf  .xlsx  .xls  .docx  .pptx");
     process.exit(1);
   }
 
