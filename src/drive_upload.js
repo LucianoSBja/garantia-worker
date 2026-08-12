@@ -5,7 +5,7 @@
 //   node src/drive_upload.js ./docs        sube lo que falte y actualiza el mapa en KV
 //   node src/drive_upload.js --solo-mapa   no sube nada, solo reescribe el mapa en KV
 
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { readdirSync, readFileSync, statSync } from 'fs';
 import { basename, extname, join } from 'path';
 import { getAccessToken } from './google_auth.js';
 
@@ -15,10 +15,6 @@ const KV_NAMESPACE_ID = process.env.CF_KV_NAMESPACE_ID || 'd1f39512c3204c818120f
 
 const CARPETA_DRIVE = 'GarantIA - Documentos';
 const EXTENSIONES = ['.pdf', '.xlsx', '.xls', '.docx'];
-
-// Los nombres de archivo son únicos en todo el corpus salvo un duplicado exacto,
-// así que alcanza con guardar el mapa por nombre, sin la ruta.
-const MANIFIESTO = '.drive-manifest.json';
 
 // El Worker lee esta clave para resolver el link de cada documento citado.
 const KV_KEY = 'docs:urls';
@@ -32,24 +28,6 @@ const MIME_POR_EXTENSION = {
 
 const REINTENTOS_MAX = 4;
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ── Manifiesto ───────────────────────────────────────────
-// Mismo criterio que el checkpoint de la ingesta: anotar lo hecho para que una
-// corrida cortada retome donde quedó en vez de volver a subir 233 MB.
-
-function leerManifiesto() {
-	if (!existsSync(MANIFIESTO)) return {};
-	try {
-		return JSON.parse(readFileSync(MANIFIESTO, 'utf8'));
-	} catch {
-		console.warn('  ⚠️  Manifiesto ilegible, se ignora y se sube todo de nuevo.');
-		return {};
-	}
-}
-
-function guardarManifiesto(manifiesto) {
-	writeFileSync(MANIFIESTO, JSON.stringify(manifiesto, null, 2));
-}
 
 // ── Drive ────────────────────────────────────────────────
 
@@ -88,6 +66,41 @@ async function obtenerOCrearCarpeta(token) {
 	const { id } = await creada.json();
 	console.log(`📁 Carpeta creada en Drive: ${CARPETA_DRIVE}`);
 	return id;
+}
+
+// Qué hay ya subido. Se consulta a Drive en vez de llevar un registro local:
+// Drive permite nombres repetidos en una carpeta, así que un archivo de estado
+// perdido —un clon nuevo, un repo limpio— haría subir el corpus entero de nuevo
+// y dejaría 207 duplicados.
+async function listarCarpeta(token, carpetaId) {
+	const yaSubidos = {};
+	const repetidos = [];
+	let pageToken;
+
+	do {
+		const params = new URLSearchParams({
+			q: `'${carpetaId}' in parents and trashed=false`,
+			fields: 'nextPageToken,files(name,webViewLink)',
+			pageSize: '1000',
+		});
+		if (pageToken) params.set('pageToken', pageToken);
+
+		const res = await pedirDrive(token, `https://www.googleapis.com/drive/v3/files?${params}`);
+		const data = await res.json();
+
+		for (const archivo of data.files || []) {
+			if (yaSubidos[archivo.name]) repetidos.push(archivo.name);
+			else yaSubidos[archivo.name] = archivo.webViewLink;
+		}
+		pageToken = data.nextPageToken;
+	} while (pageToken);
+
+	if (repetidos.length > 0) {
+		console.warn(`\n⚠️  Hay ${repetidos.length} nombres duplicados en Drive de alguna corrida previa.`);
+		console.warn('   Se usa la primera copia de cada uno; conviene borrar las sobrantes a mano.');
+	}
+
+	return yaSubidos;
 }
 
 // El upload simple corta en 5 MB y en el corpus hay 11 archivos que lo superan
@@ -175,32 +188,25 @@ async function main() {
 		process.exit(1);
 	}
 
-	const manifiesto = leerManifiesto();
+	const token = await getAccessToken();
+	const carpetaId = await obtenerOCrearCarpeta(token);
+	const mapa = await listarCarpeta(token, carpetaId);
 
 	if (process.argv.includes('--solo-mapa')) {
-		await publicarMapa(manifiesto);
-		console.log(`\n✅ Mapa republicado en KV: ${Object.keys(manifiesto).length} documentos\n`);
+		await publicarMapa(mapa);
+		console.log(`\n✅ Mapa republicado en KV: ${Object.keys(mapa).length} documentos\n`);
 		return;
 	}
 
 	const target = process.argv[2] || './docs';
 	const archivos = buscarArchivos(target);
-	const pendientes = archivos.filter((f) => !manifiesto[basename(f)]);
+	const pendientes = archivos.filter((f) => !mapa[basename(f)]);
 
 	console.log(`\n🔍 Archivos encontrados: ${archivos.length}`);
 	if (archivos.length !== pendientes.length) {
-		console.log(`   ⏭️  Ya subidos: ${archivos.length - pendientes.length}`);
-		console.log(`   📋 Pendientes: ${pendientes.length}`);
+		console.log(`   ⏭️  Ya están en Drive: ${archivos.length - pendientes.length}`);
+		console.log(`   📋 Pendientes:        ${pendientes.length}`);
 	}
-
-	if (pendientes.length === 0) {
-		console.log('\n✅ No queda nada por subir.\n');
-		await publicarMapa(manifiesto);
-		return;
-	}
-
-	const token = await getAccessToken();
-	const carpetaId = await obtenerOCrearCarpeta(token);
 
 	let subidos = 0;
 	let errores = 0;
@@ -209,9 +215,7 @@ async function main() {
 		const nombre = basename(archivo);
 		process.stdout.write(`  ⬆️  ${i + 1}/${pendientes.length} ${nombre.slice(0, 60)}...\r`);
 		try {
-			manifiesto[nombre] = await subirArchivo(token, archivo, carpetaId);
-			// Se anota apenas termina cada archivo, así una caída no pierde lo subido.
-			guardarManifiesto(manifiesto);
+			mapa[nombre] = await subirArchivo(token, archivo, carpetaId);
 			subidos++;
 		} catch (err) {
 			console.error(`\n  ❌ ${nombre}: ${err.message}`);
@@ -219,16 +223,16 @@ async function main() {
 		}
 	}
 
-	await publicarMapa(manifiesto);
+	await publicarMapa(mapa);
 
 	console.log(`\n\n🎉 Subida completa`);
 	console.log(`   ✅ Documentos subidos:  ${subidos}`);
 	console.log(`   ❌ Con error:           ${errores}`);
-	console.log(`   🔗 Mapa en KV:          ${Object.keys(manifiesto).length} documentos\n`);
+	console.log(`   🔗 Mapa en KV:          ${Object.keys(mapa).length} documentos\n`);
 }
 
 main().catch((err) => {
 	console.error(`\n❌ ${err.message}`);
-	console.error('   Lo subido hasta acá quedó en el manifiesto. Volvé a correr el script para retomar.\n');
+	console.error('   Lo subido hasta acá ya está en Drive. Volvé a correr el script para retomar.\n');
 	process.exit(1);
 });

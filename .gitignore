@@ -147,4 +147,3 @@ docs/
 .env
 .dev.vars
 .ingest-checkpoint.json
-.drive-manifest.json

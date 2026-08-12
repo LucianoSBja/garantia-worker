@@ -34,7 +34,7 @@ Cuatro archivos en `src/`, sin build step:
 - **`src/index.js`** — el Worker entero (~820 líneas): rutas, pipeline RAG y la UI de chat completa devuelta como string desde `chatHTML()` (HTML + CSS + JS inline, sin frontend separado ni assets).
 - **`src/ingest.js`** / **`src/ingest_file.js`** — scripts Node que parsean documentos, chunkean, embeben y hacen upsert a Vectorize vía la REST API de Cloudflare. **Duplican la misma lógica a propósito** (parsers, `chunkText`, `getEmbedding`, `upsertVectors`, filtro de VIN, constantes de modelo): un cambio en uno casi siempre debe replicarse en el otro y, si toca embeddings, también en `index.js`.
 - **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. Exporta `getAccessToken()`; solo dispara el flujo interactivo si se lo invoca directamente, porque `drive_upload.js` lo importa.
-- **`src/drive_upload.js`** — sube los documentos a Drive y escribe el mapa nombre → URL en la clave `docs:urls` de KV.
+- **`src/drive_upload.js`** — sube los documentos a Drive y escribe el mapa nombre → URL en la clave `docs:urls` de KV. Qué está ya subido lo pregunta a Drive, no a un archivo local: Drive admite nombres repetidos en una carpeta, así que un registro de estado perdido haría subir el corpus entero de nuevo y dejaría 207 duplicados.
 
 ### Links a Drive
 

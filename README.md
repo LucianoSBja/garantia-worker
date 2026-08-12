@@ -199,7 +199,7 @@ node src/drive_upload.js ./docs
  
 El primer comando abre el navegador y al final imprime `GOOGLE_REFRESH_TOKEN`, que va al `.env`. El segundo sube los documentos a la carpeta **GarantIA - Documentos**, los deja públicos de lectura y escribe el mapa nombre → URL en la clave `docs:urls` de KV. El Worker lee esa clave y convierte el archivo citado en un link; si el mapa no existe, responde igual con el nombre en texto plano.
  
-Se anota lo subido en `.drive-manifest.json`, así que volver a correrlo sube solo lo que falte. Para reescribir el mapa en KV sin subir nada: `node src/drive_upload.js --solo-mapa`.
+Antes de subir consulta qué hay en la carpeta de Drive, así que volver a correrlo sube solo lo que falte y no depende de ningún archivo de estado local. Para reescribir el mapa en KV sin subir nada: `node src/drive_upload.js --solo-mapa`.
  
 > Si la app de Google quedó en estado "Testing" en la consola, el refresh token vence a los 7 días. Publicarla en "In Production" para que no caduque.
  
