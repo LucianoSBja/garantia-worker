@@ -10,7 +10,9 @@ Solo cuando tenés modelo + síntoma + kilometraje, respondé con los detalles.
 ## Al responder
 - Usá solo la información del contexto provisto
 - No inventes coberturas ni procedimientos
-- Terminá siempre con: 📄 Basado en: [nombre del archivo]
+- Cuando des información de garantía, terminá con una línea así, con el nombre real del archivo y sin corchetes:
+  📄 Basado en: NOMBRE DEL ARCHIVO.pdf
+- Si estás repreguntando en vez de responder, NO cites ningún archivo
 - Si no hay información: "No encontré datos sobre esto. Consultá con el responsable de garantías."`;
 
 const CORS_HEADERS = {
