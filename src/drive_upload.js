@@ -68,6 +68,14 @@ async function obtenerOCrearCarpeta(token) {
 	return id;
 }
 
+// El webViewLink que devuelve Drive arrastra parámetros de sesión, y en los
+// archivos de Office viene además ouid, que es el identificador de la cuenta
+// dueña del Drive. Como estas URLs terminan a la vista en el chat, se conserva
+// solo la parte que identifica al documento. Verificado: abren igual sin query.
+function limpiarUrl(url) {
+	return url ? url.split('?')[0] : url;
+}
+
 // Qué hay ya subido. Se consulta a Drive en vez de llevar un registro local:
 // Drive permite nombres repetidos en una carpeta, así que un archivo de estado
 // perdido —un clon nuevo, un repo limpio— haría subir el corpus entero de nuevo
@@ -90,7 +98,7 @@ async function listarCarpeta(token, carpetaId) {
 
 		for (const archivo of data.files || []) {
 			if (yaSubidos[archivo.name]) repetidos.push(archivo.name);
-			else yaSubidos[archivo.name] = archivo.webViewLink;
+			else yaSubidos[archivo.name] = limpiarUrl(archivo.webViewLink);
 		}
 		pageToken = data.nextPageToken;
 	} while (pageToken);
@@ -139,7 +147,7 @@ async function subirArchivo(token, filePath, carpetaId) {
 
 	const meta = await pedirDrive(token, `https://www.googleapis.com/drive/v3/files/${id}?fields=webViewLink`);
 	const { webViewLink } = await meta.json();
-	return webViewLink;
+	return limpiarUrl(webViewLink);
 }
 
 // ── KV ───────────────────────────────────────────────────
