@@ -29,10 +29,11 @@ node src/ingest_file.js "docs/ARCHIVO.pdf" # un solo archivo
 
 ## Arquitectura
 
-Tres archivos en `src/`, sin build step:
+Cuatro archivos en `src/`, sin build step:
 
 - **`src/index.js`** — el Worker entero (~820 líneas): rutas, pipeline RAG y la UI de chat completa devuelta como string desde `chatHTML()` (HTML + CSS + JS inline, sin frontend separado ni assets).
-- **`src/ingest.js`** / **`src/ingest_file.js`** — scripts Node que parsean documentos, chunkean, embeben y hacen upsert a Vectorize vía la REST API de Cloudflare. **Duplican la misma lógica a propósito** (parsers, `chunkText`, `getEmbedding`, `upsertVectors`, constantes de modelo): un cambio en uno casi siempre debe replicarse en el otro y, si toca embeddings, también en `index.js`.
+- **`src/ingest.js`** / **`src/ingest_file.js`** — scripts Node que parsean documentos, chunkean, embeben y hacen upsert a Vectorize vía la REST API de Cloudflare. **Duplican la misma lógica a propósito** (parsers, `chunkText`, `getEmbedding`, `upsertVectors`, filtro de VIN, constantes de modelo): un cambio en uno casi siempre debe replicarse en el otro y, si toca embeddings, también en `index.js`.
+- **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. No lo usa nadie todavía: la subida a Drive está pendiente. Exporta `getAccessToken()` para cuando se implemente.
 
 Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 404.
 
@@ -55,10 +56,11 @@ El pipeline se migró de Workers AI (bge-m3 + Llama 3.1) a la API de Google AI S
 - Generación: `gemini-3.5-flash-lite`, temperature 0.2, maxOutputTokens 512.
 - Auth por header `x-goog-api-key` con `env.GOOGLE_API_KEY`. No hay binding `AI` en `wrangler.jsonc`.
 
-Dos detalles fáciles de romper:
+Tres detalles fáciles de romper:
 
 - **Task types asimétricos**: la ingesta usa `RETRIEVAL_DOCUMENT` y la consulta `RETRIEVAL_QUERY`. Son parte de la calidad del retrieval, no intercambiables.
 - **Roles**: la app usa `user`/`assistant` internamente; Gemini espera `user`/`model`. La conversión pasa por `toGeminiRole()` — el historial nunca debe ir crudo a `contents`.
+- **Filtro `VIN_RE`**: descarta las filas de chasis de las planillas. Es una decisión de producto documentada abajo, no una optimización — sacarlo multiplica el índice por tres y no mejora ninguna respuesta.
 
 Las 768 dimensiones están acopladas al índice `garantia-index-gemini` (declarado en `wrangler.jsonc` y hardcodeado como `INDEX_NAME` en ambos scripts de ingesta). Cambiar el modelo o las dimensiones obliga a crear un índice nuevo y re-indexar todo — Vectorize no permite cambiar dimensiones en caliente.
 
@@ -66,9 +68,13 @@ Las 768 dimensiones están acopladas al índice `garantia-index-gemini` (declara
 
 Chunks de 400 palabras con overlap de 50, descartando los de <50 caracteres. Los IDs son determinísticos (`nombreArchivoSanitizado-índiceDeChunk`), así que re-ingestar el mismo archivo sobreescribe en lugar de duplicar. Contrapartida conocida: si un documento se achica, los vectores de los chunks sobrantes quedan huérfanos en el índice.
 
-El loop de embeddings **no tiene try/catch ni checkpoint**: un fallo de la API a mitad de camino aborta la corrida entera sin reintento. Tenerlo en cuenta antes de lanzar ingestas largas.
+`ingest.js` anota cada archivo terminado en `.ingest-checkpoint.json` (gitignoreado), así que una corrida cortada retoma donde quedó. `ingest_file.js` no lo hace: procesa un solo archivo y no tendría sentido. Ante un `429` ambos reintentan con backoff exponencial (`REINTENTOS_MAX`, 5s → 80s) y esperan `PAUSA_MS` entre fragmentos para no pasarse de los 100 requests por minuto del free tier.
 
-Formatos: `.pdf` (pdf2json, solo texto — no hay OCR), `.xlsx`/`.xls` (SheetJS), `.docx` (mammoth).
+La cuota gratuita de Gemini corta a los 1.000 embeddings diarios y se resetea a la medianoche del Pacífico (4 AM en Argentina). El corpus completo son ~790 fragmentos, así que entra en una tanda, pero una re-indexación total desde cero después de tocar el chunking puede no entrar.
+
+Formatos: `.pdf` (pdf2json, solo texto — no hay OCR), `.xlsx`/`.xls` (SheetJS), `.docx` (mammoth). Ojo con SheetJS: el build ESM no trae `XLSX.readFile`, hay que leer a buffer y usar `XLSX.read(buf, { type: 'buffer' })`.
+
+**Filtro de VIN**: las planillas de anexos de campañas traen miles de filas de chasis. `VIN_RE` las descarta y en su lugar deja una línea con el total de vehículos alcanzados. Los vectores de VIN son ruido —cadenas aleatorias que embeben casi idéntico entre sí— y triplicaban el índice. La contrapartida es que el bot no puede responder "¿el chasis X entra en la campaña ABI-502?": eso es lookup exacto, no búsqueda semántica, y se resolvería con un mapa VIN→campaña en KV.
 
 ## Secrets
 
@@ -76,7 +82,7 @@ Tres lugares distintos, cada uno con su consumidor:
 
 | Archivo | Lo lee | Variables |
 |---|---|---|
-| `.env` | scripts Node de ingesta (`source .env`) | `CF_ACCOUNT_ID`, `CF_API_TOKEN`, `GOOGLE_API_KEY` |
+| `.env` | scripts Node de ingesta (`source .env`) | `CF_ACCOUNT_ID`, `CF_API_TOKEN`, `GOOGLE_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
 | `.dev.vars` | `wrangler dev` | `GOOGLE_API_KEY` |
 | `wrangler secret put` | Worker en producción | `GOOGLE_API_KEY` |
 
