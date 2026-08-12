@@ -8,6 +8,7 @@
 import { createServer } from "http";
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
+import { fileURLToPath } from "url";
 
 const CLIENT_ID     = process.env.GOOGLE_OAUTH_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -208,7 +209,11 @@ async function main() {
   else await authorize();
 }
 
-main().catch((err) => {
-  console.error("❌", err.message);
-  process.exit(1);
-});
+// Solo arranca el flujo si se invoca el archivo directamente: drive_upload.js
+// importa getAccessToken y no tiene que quedarse esperando una autorización.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error("❌", err.message);
+    process.exit(1);
+  });
+}
