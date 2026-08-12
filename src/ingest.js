@@ -1,7 +1,7 @@
 // Script de ingesta — GarantIA
 // Uso: node src/ingest.js <carpeta>
 
-import { readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { basename, extname, join } from "path";
 import { createRequire } from "module";
 import * as XLSX from "xlsx";
@@ -19,6 +19,16 @@ const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models
 const GEMINI_EMBED_MODEL = "gemini-embedding-001";
 const GEMINI_EMBED_DIMENSIONS = 768;
 
+// Un VIN es alfanumérico de 17 caracteres, sin I, O ni Q.
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/;
+
+// El free tier de embeddings permite 100 requests por minuto. Vamos a ~85 para
+// dejar margen, y ante un 429 esperamos cada vez más antes de reintentar.
+const PAUSA_MS       = 700;
+const REINTENTOS_MAX = 5;
+
+const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ── Parsers ──────────────────────────────────────────────
 
 function parsePDF(filePath) {
@@ -31,15 +41,34 @@ function parsePDF(filePath) {
 }
 
 function parseExcel(filePath) {
-  const workbook = XLSX.readFile(filePath);
+  // XLSX.readFile no existe en el build ESM de SheetJS (necesita un fs que no
+  // trae enganchado). Leemos el archivo a buffer y lo parseamos desde ahí.
+  const workbook = XLSX.read(readFileSync(filePath), { type: "buffer" });
   let text = "";
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1 });
     text += `\n## Hoja: ${sheetName}\n`;
+
+    let omitidas = 0;
     for (const row of rows) {
       const line = row.filter(Boolean).join(" | ");
-      if (line.trim()) text += line + "\n";
+      if (!line.trim()) continue;
+
+      // Los anexos de campañas traen miles de filas de VIN. Como texto para
+      // búsqueda semántica no sirven —cada VIN es una cadena aleatoria y los
+      // vectores salen casi idénticos entre sí— y encima inflan el índice.
+      // Nos quedamos con los encabezados, que son los que describen la campaña.
+      if (VIN_RE.test(line)) {
+        omitidas++;
+        continue;
+      }
+      text += line + "\n";
+    }
+
+    // Dejamos constancia del dato agregado, que sí es consultable.
+    if (omitidas > 0) {
+      text += `(${omitidas} vehículos alcanzados, listado de VIN omitido del índice)\n`;
     }
   }
   return text;
@@ -70,21 +99,35 @@ function chunkText(text, chunkSize = 400, overlap = 50) {
 // ── Cloudflare API ───────────────────────────────────────
 
 async function getEmbedding(text) {
-  const res = await fetch(
-    `${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`,
-    {
-      method: "POST",
-      headers: { "x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_DOCUMENT",
-        outputDimensionality: GEMINI_EMBED_DIMENSIONS,
-      }),
+  for (let intento = 0; intento <= REINTENTOS_MAX; intento++) {
+    const res = await fetch(
+      `${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`,
+      {
+        method: "POST",
+        headers: { "x-goog-api-key": GOOGLE_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_DOCUMENT",
+          outputDimensionality: GEMINI_EMBED_DIMENSIONS,
+        }),
+      }
+    );
+
+    if (res.status === 429) {
+      if (intento === REINTENTOS_MAX) {
+        throw new Error("Cuota de Gemini agotada tras " + REINTENTOS_MAX + " reintentos. Probá de nuevo más tarde.");
+      }
+      // 5s, 10s, 20s, 40s, 80s
+      const espera = 5000 * 2 ** intento;
+      process.stdout.write(`\n  ⏳ Cuota alcanzada, esperando ${espera / 1000}s...`);
+      await dormir(espera);
+      continue;
     }
-  );
-  const data = await res.json();
-  if (!data.embedding?.values) throw new Error("Error embedding: " + JSON.stringify(data));
-  return data.embedding.values;
+
+    const data = await res.json();
+    if (!data.embedding?.values) throw new Error("Error embedding: " + JSON.stringify(data));
+    return data.embedding.values;
+  }
 }
 
 async function upsertVectors(vectors) {
@@ -135,6 +178,7 @@ async function ingestFile(filePath) {
       values:   embedding,
       metadata: { source: fileName, text: chunks[i], chunk: i },
     });
+    if (i < chunks.length - 1) await dormir(PAUSA_MS);
   }
 
   const batchSize = 100;
@@ -148,6 +192,29 @@ async function ingestFile(filePath) {
 
   console.log(`  ✅ ${chunks.length} fragmentos indexados`);
   return chunks.length;
+}
+
+// ── Checkpoint ───────────────────────────────────────────
+// La cuota gratuita de Gemini corta a los 1.000 embeddings diarios. Anotamos
+// cada archivo terminado para que una corrida cortada retome donde quedó en
+// vez de volver a embeber todo desde cero.
+
+const CHECKPOINT = ".ingest-checkpoint.json";
+
+function leerCheckpoint() {
+  if (!existsSync(CHECKPOINT)) return new Set();
+  try {
+    return new Set(JSON.parse(readFileSync(CHECKPOINT, "utf8")));
+  } catch {
+    console.warn("  ⚠️  Checkpoint ilegible, se ignora y se empieza de cero.");
+    return new Set();
+  }
+}
+
+function marcarHecho(filePath) {
+  const hechos = leerCheckpoint();
+  hechos.add(filePath);
+  writeFileSync(CHECKPOINT, JSON.stringify([...hechos], null, 2));
 }
 
 // ── Buscar archivos ──────────────────────────────────────
@@ -184,18 +251,32 @@ async function main() {
     process.exit(1);
   }
 
+  const hechos = leerCheckpoint();
+  const pendientes = files.filter((f) => !hechos.has(f));
+
   console.log(`\n🔍 Archivos encontrados: ${files.length}`);
-  files.forEach((f) => console.log(`   - ${f}`));
+  if (hechos.size > 0) {
+    console.log(`   ⏭️  Ya indexados en corridas previas: ${hechos.size}`);
+    console.log(`   📋 Pendientes: ${pendientes.length}`);
+  }
   console.log("");
+
+  if (pendientes.length === 0) {
+    console.log("✅ No queda nada por indexar. Borrá el checkpoint si querés rehacer todo:");
+    console.log(`   rm ${CHECKPOINT}\n`);
+    return;
+  }
 
   let totalChunks = 0;
   let errores     = 0;
 
-  for (const file of files) {
+  for (const file of pendientes) {
     console.log(`\n📄 ${file}`);
     const chunks = await ingestFile(file);
     if (chunks === 0) errores++;
     totalChunks += chunks;
+    // Se anota apenas termina, así una caída no pierde lo ya hecho.
+    marcarHecho(file);
   }
 
   console.log(`\n🎉 Ingesta completa`);
@@ -203,4 +284,8 @@ async function main() {
   console.log(`   ❌ Archivos con error:   ${errores}\n`);
 }
 
-main();
+main().catch((err) => {
+  console.error(`\n❌ ${err.message}`);
+  console.error(`   Lo indexado hasta acá quedó registrado. Volvé a correr el script para retomar.\n`);
+  process.exit(1);
+});

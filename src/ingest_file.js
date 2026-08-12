@@ -1,4 +1,5 @@
 // Ingesta de archivo individual — soporta PDF, Excel y DOCX
+import { readFileSync } from "fs";
 import { basename, extname } from "path";
 import { createRequire } from "module";
 import * as XLSX from "xlsx";
@@ -15,6 +16,16 @@ const INDEX_NAME = "garantia-index-gemini";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_EMBED_MODEL = "gemini-embedding-001";
 const GEMINI_EMBED_DIMENSIONS = 768;
+
+// Un VIN es alfanumérico de 17 caracteres, sin I, O ni Q.
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/;
+
+// El free tier de embeddings permite 100 requests por minuto. Vamos a ~85 para
+// dejar margen, y ante un 429 esperamos cada vez más antes de reintentar.
+const PAUSA_MS       = 700;
+const REINTENTOS_MAX = 5;
+
+const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── IDs ──────────────────────────────────────────────────────────────────────
 function makeId(fileName, chunk) {
@@ -33,15 +44,34 @@ function parsePDF(filePath) {
 }
 
 function parseExcel(filePath) {
-  const workbook = XLSX.readFile(filePath);
+  // XLSX.readFile no existe en el build ESM de SheetJS (necesita un fs que no
+  // trae enganchado). Leemos el archivo a buffer y lo parseamos desde ahí.
+  const workbook = XLSX.read(readFileSync(filePath), { type: "buffer" });
   let text = "";
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
     const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1 });
     text += `\n## Hoja: ${sheetName}\n`;
+
+    let omitidas = 0;
     for (const row of rows) {
       const line = row.filter(Boolean).join(" | ");
-      if (line.trim()) text += line + "\n";
+      if (!line.trim()) continue;
+
+      // Los anexos de campañas traen miles de filas de VIN. Como texto para
+      // búsqueda semántica no sirven —cada VIN es una cadena aleatoria y los
+      // vectores salen casi idénticos entre sí— y encima inflan el índice.
+      // Nos quedamos con los encabezados, que son los que describen la campaña.
+      if (VIN_RE.test(line)) {
+        omitidas++;
+        continue;
+      }
+      text += line + "\n";
+    }
+
+    // Dejamos constancia del dato agregado, que sí es consultable.
+    if (omitidas > 0) {
+      text += `(${omitidas} vehículos alcanzados, listado de VIN omitido del índice)\n`;
     }
   }
   return text;
@@ -71,24 +101,38 @@ function chunkText(text, chunkSize = 400, overlap = 50) {
 
 // ── Cloudflare AI embedding ───────────────────────────────────────────────────
 async function getEmbedding(text) {
-  const res = await fetch(
-    `${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`,
-    {
-      method: "POST",
-      headers: {
-        "x-goog-api-key": GOOGLE_API_KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        content: { parts: [{ text }] },
-        taskType: "RETRIEVAL_DOCUMENT",
-        outputDimensionality: GEMINI_EMBED_DIMENSIONS,
-      }),
+  for (let intento = 0; intento <= REINTENTOS_MAX; intento++) {
+    const res = await fetch(
+      `${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`,
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": GOOGLE_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          taskType: "RETRIEVAL_DOCUMENT",
+          outputDimensionality: GEMINI_EMBED_DIMENSIONS,
+        }),
+      }
+    );
+
+    if (res.status === 429) {
+      if (intento === REINTENTOS_MAX) {
+        throw new Error("Cuota de Gemini agotada tras " + REINTENTOS_MAX + " reintentos. Probá de nuevo más tarde.");
+      }
+      // 5s, 10s, 20s, 40s, 80s
+      const espera = 5000 * 2 ** intento;
+      process.stdout.write(`\n  ⏳ Cuota alcanzada, esperando ${espera / 1000}s...`);
+      await dormir(espera);
+      continue;
     }
-  );
-  const data = await res.json();
-  if (!data.embedding?.values) throw new Error("Error embedding: " + JSON.stringify(data));
-  return data.embedding.values;
+
+    const data = await res.json();
+    if (!data.embedding?.values) throw new Error("Error embedding: " + JSON.stringify(data));
+    return data.embedding.values;
+  }
 }
 
 // ── Vectorize upsert ──────────────────────────────────────────────────────────
@@ -158,6 +202,7 @@ async function main() {
       values:   embedding,
       metadata: { source: fileName, text: chunks[i], chunk: i },
     });
+    if (i < chunks.length - 1) await dormir(PAUSA_MS);
   }
 
   const batchSize = 100;

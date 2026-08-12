@@ -146,3 +146,4 @@ dist
 docs/
 .env
 .dev.vars
+.ingest-checkpoint.json
