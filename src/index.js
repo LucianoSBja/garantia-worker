@@ -748,6 +748,53 @@ function chatHTML() {
       chat.scrollTop = 0;
     }
 
+    // Lo que devuelve el modelo es texto arbitrario, y marked deja pasar el HTML
+    // crudo que venga adentro. Metido directo en innerHTML, un <img onerror=...>
+    // se ejecuta. Por eso el markdown se renderiza en un documento inerte, se
+    // filtra contra una lista blanca y recién ahí se inserta.
+    const ETIQUETAS_PERMITIDAS = new Set([
+      'P','BR','HR','STRONG','B','EM','I','DEL','CODE','PRE','BLOCKQUOTE',
+      'UL','OL','LI','H1','H2','H3','H4','H5','H6','A','SPAN',
+      'TABLE','THEAD','TBODY','TR','TH','TD',
+    ]);
+
+    function limpiarNodo(nodo) {
+      [...nodo.children].forEach(hijo => {
+        // Primero los descendientes: así, si hay que desarmar este elemento, lo
+        // que sube al padre ya viene limpio.
+        limpiarNodo(hijo);
+
+        if (!ETIQUETAS_PERMITIDAS.has(hijo.tagName)) {
+          // Se conserva el texto y se tira la etiqueta.
+          hijo.replaceWith(...hijo.childNodes);
+          return;
+        }
+
+        // Sin excepciones para on*, style, srcdoc y demás: el único atributo que
+        // sobrevive es el href de un link http(s), lo que descarta javascript:.
+        [...hijo.attributes].forEach(attr => {
+          const esHrefValido = hijo.tagName === 'A' && attr.name === 'href' && /^https?:/i.test(attr.value);
+          if (!esHrefValido) hijo.removeAttribute(attr.name);
+        });
+
+        // Los links de las fuentes van a Drive: se abren aparte para no perder
+        // la conversación.
+        if (hijo.tagName === 'A' && hijo.getAttribute('href')) {
+          hijo.setAttribute('target', '_blank');
+          hijo.setAttribute('rel', 'noopener noreferrer');
+        }
+      });
+    }
+
+    function renderMarkdownSeguro(text) {
+      const html = marked.parse(String(text || ''));
+      // DOMParser no ejecuta scripts ni dispara handlers: el documento queda
+      // inerte hasta que uno decide adoptarlo.
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      limpiarNodo(doc.body);
+      return [...doc.body.childNodes];
+    }
+
     function addMsg(text, role, cached = false) {
         if (role === 'user') conversationHistory.push({ role: 'user', content: text });
         if (role === 'bot')  conversationHistory.push({ role: 'assistant', content: text });
@@ -772,13 +819,7 @@ function chatHTML() {
                 breaks: true,    // saltos de línea simples → <br>
                 gfm: true,       // GitHub Flavored Markdown
             });
-            bubble.innerHTML = marked.parse(String(text || ''));
-            // Los links de las fuentes van a Drive: se abren aparte para no
-            // perder la conversación.
-            bubble.querySelectorAll('a').forEach(function (a) {
-                a.target = '_blank';
-                a.rel = 'noopener noreferrer';
-            });
+            bubble.replaceChildren(...renderMarkdownSeguro(text));
             } catch (e) {
             // Fallback: mostrar como texto plano si marked falla
             bubble.textContent = text;

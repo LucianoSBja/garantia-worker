@@ -44,6 +44,12 @@ Cuatro archivos en `src/`, sin build step:
 - Al caché KV va la respuesta **sin** los links, y la linkificación se aplica al leerla. Así republicar el mapa se refleja en lo ya cacheado.
 - Si `docs:urls` no existe, la respuesta sale igual con el nombre en texto plano. La feature es opcional y no debe romper el chat.
 
+### Renderizado de las respuestas
+
+La salida del modelo **nunca** va directo a `innerHTML`: marked deja pasar HTML crudo, y un `<img onerror=...>` se ejecuta apenas se asigna. `renderMarkdownSeguro()` parsea el markdown en un documento inerte (`DOMParser`), lo filtra contra `ETIQUETAS_PERMITIDAS` y recién ahí inserta los nodos con `replaceChildren`.
+
+El filtro borra **todos** los atributos salvo `href` de un `<a>` http(s), así que no hay lista negra de `on*` que mantener. Al agregar una etiqueta nueva al allowlist, pensar qué atributos habilita: la lógica falla cerrada, y romper eso es la única forma de reabrir el agujero.
+
 Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 404.
 
 ### Flujo de `handleChat`
