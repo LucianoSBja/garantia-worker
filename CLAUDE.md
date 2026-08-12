@@ -33,7 +33,16 @@ Cuatro archivos en `src/`, sin build step:
 
 - **`src/index.js`** — el Worker entero (~820 líneas): rutas, pipeline RAG y la UI de chat completa devuelta como string desde `chatHTML()` (HTML + CSS + JS inline, sin frontend separado ni assets).
 - **`src/ingest.js`** / **`src/ingest_file.js`** — scripts Node que parsean documentos, chunkean, embeben y hacen upsert a Vectorize vía la REST API de Cloudflare. **Duplican la misma lógica a propósito** (parsers, `chunkText`, `getEmbedding`, `upsertVectors`, filtro de VIN, constantes de modelo): un cambio en uno casi siempre debe replicarse en el otro y, si toca embeddings, también en `index.js`.
-- **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. No lo usa nadie todavía: la subida a Drive está pendiente. Exporta `getAccessToken()` para cuando se implemente.
+- **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. Exporta `getAccessToken()`; solo dispara el flujo interactivo si se lo invoca directamente, porque `drive_upload.js` lo importa.
+- **`src/drive_upload.js`** — sube los documentos a Drive y escribe el mapa nombre → URL en la clave `docs:urls` de KV.
+
+### Links a Drive
+
+`handleChat` lee `docs:urls` y convierte en link markdown cada nombre de archivo que el modelo haya citado. Tres detalles:
+
+- El reemplazo es de **una sola pasada** con una alternativa de regex por documento, ordenadas de mayor a menor longitud. De a uno, un nombre corto matchearía adentro del markdown recién insertado por otro más largo.
+- Al caché KV va la respuesta **sin** los links, y la linkificación se aplica al leerla. Así republicar el mapa se refleja en lo ya cacheado.
+- Si `docs:urls` no existe, la respuesta sale igual con el nombre en texto plano. La feature es opcional y no debe romper el chat.
 
 Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 404.
 

@@ -13,17 +13,25 @@ function mockFetch({ embedding = new Array(768).fill(0.01), reply = 'Respuesta g
 	});
 }
 
-function makeEnv({ cachedReply = null, matches = [] } = {}) {
+function makeEnv({ cachedReply = null, matches = [], docsUrls = null } = {}) {
 	return {
 		GOOGLE_API_KEY: 'fake-key',
 		VECTORIZE: {
 			query: vi.fn(async () => ({ matches })),
 		},
 		garantia_cache: {
-			get: vi.fn(async () => cachedReply),
+			// El namespace guarda dos cosas distintas: las respuestas cacheadas bajo
+			// chat:* y el mapa de links de Drive bajo docs:urls.
+			get: vi.fn(async (key) => (key === 'docs:urls' ? docsUrls : cachedReply)),
 			put: vi.fn(async () => {}),
 		},
 	};
+}
+
+// El mapa de Drive se consulta en todas las respuestas, así que para verificar el
+// caché de chat hay que mirar solo las lecturas de esa clave.
+function lecturasDeCacheDeChat(env) {
+	return env.garantia_cache.get.mock.calls.filter(([key]) => key.startsWith('chat:'));
 }
 
 function makeRequest(body) {
@@ -56,7 +64,7 @@ describe('handleChat', () => {
 		const body = await res.json();
 
 		expect(body).toEqual({ reply: 'Respuesta cacheada', cached: true });
-		expect(env.garantia_cache.get).toHaveBeenCalledTimes(1);
+		expect(lecturasDeCacheDeChat(env)).toHaveLength(1);
 		expect(fetch).not.toHaveBeenCalled();
 		expect(env.VECTORIZE.query).not.toHaveBeenCalled();
 	});
@@ -95,7 +103,7 @@ describe('handleChat', () => {
 		const body = await res.json();
 
 		expect(body.cached).toBe(false);
-		expect(env.garantia_cache.get).not.toHaveBeenCalled();
+		expect(lecturasDeCacheDeChat(env)).toHaveLength(0);
 		expect(env.garantia_cache.put).not.toHaveBeenCalled();
 	});
 
@@ -115,6 +123,49 @@ describe('handleChat', () => {
 		expect(generateBody.contents[0]).toEqual({ role: 'user', parts: [{ text: 'primera pregunta' }] });
 		expect(generateBody.contents[1]).toEqual({ role: 'model', parts: [{ text: 'primera respuesta' }] });
 		expect(generateBody.systemInstruction.parts[0].text).toContain('GarantIA');
+	});
+
+	it('convierte en link el documento citado cuando el mapa de Drive está publicado', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Sí, cubre.\n\n📄 Basado en: Toyota 10 - T&C.pdf' }));
+		const env = makeEnv({ docsUrls: { 'Toyota 10 - T&C.pdf': 'https://drive.google.com/file/d/abc/view' } });
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).toBe('Sí, cubre.\n\n📄 Basado en: [Toyota 10 - T&C.pdf](https://drive.google.com/file/d/abc/view)');
+	});
+
+	it('deja la respuesta intacta si el mapa de Drive todavía no se publicó', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: '📄 Basado en: Toyota 10 - T&C.pdf' }));
+		const env = makeEnv({ docsUrls: null });
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		expect((await res.json()).reply).toBe('📄 Basado en: Toyota 10 - T&C.pdf');
+	});
+
+	it('linkifica el nombre más largo cuando un documento es prefijo de otro', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Ver ABI-502 - Anexo 5.pdf para el detalle.' }));
+		const env = makeEnv({
+			docsUrls: {
+				'ABI-502.pdf': 'https://drive.google.com/file/d/corto/view',
+				'ABI-502 - Anexo 5.pdf': 'https://drive.google.com/file/d/largo/view',
+			},
+		});
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		expect((await res.json()).reply).toBe('Ver [ABI-502 - Anexo 5.pdf](https://drive.google.com/file/d/largo/view) para el detalle.');
+	});
+
+	it('aplica los links también a una respuesta que viene del caché', async () => {
+		vi.stubGlobal('fetch', mockFetch());
+		const env = makeEnv({
+			cachedReply: '📄 Basado en: Toyota 10 - T&C.pdf',
+			docsUrls: { 'Toyota 10 - T&C.pdf': 'https://drive.google.com/file/d/abc/view' },
+		});
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.cached).toBe(true);
+		expect(body.reply).toBe('📄 Basado en: [Toyota 10 - T&C.pdf](https://drive.google.com/file/d/abc/view)');
 	});
 
 	it('filtra matches de Vectorize con score bajo y responde igual sin contexto', async () => {

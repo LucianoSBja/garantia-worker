@@ -15,6 +15,36 @@ Solo cuando tenés modelo + síntoma + kilometraje, respondé con los detalles.
 - Si estás repreguntando en vez de responder, NO cites ningún archivo
 - Si no hay información: "No encontré datos sobre esto. Consultá con el responsable de garantías."`;
 
+// Mapa nombre de archivo -> URL de Drive, que publica src/drive_upload.js.
+const KV_KEY_DOCS = 'docs:urls';
+
+// Convierte en link cada nombre de archivo que el modelo haya citado. Se hace en
+// una sola pasada con una alternativa por documento: reemplazar de a uno haría
+// que un nombre corto matcheara adentro del markdown recién insertado por otro
+// más largo. Van ordenados de mayor a menor por el mismo motivo.
+function linkificarFuentes(reply, mapa) {
+	const nombres = Object.keys(mapa)
+		.filter((n) => reply.includes(n))
+		.sort((a, b) => b.length - a.length);
+
+	if (nombres.length === 0) return reply;
+
+	const patron = nombres.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+	return reply.replace(new RegExp(patron, 'g'), (nombre) => `[${nombre}](${mapa[nombre]})`);
+}
+
+async function conLinksDeDrive(env, reply) {
+	try {
+		const mapa = await env.garantia_cache.get(KV_KEY_DOCS, 'json');
+		return mapa ? linkificarFuentes(reply, mapa) : reply;
+	} catch (err) {
+		// Si el mapa todavía no se publicó o está roto, la respuesta sirve igual
+		// con el nombre del archivo en texto plano.
+		console.error('No se pudo aplicar el mapa de Drive:', err);
+		return reply;
+	}
+}
+
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
 	'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -112,7 +142,7 @@ export async function handleChat(request, env) {
 
 		if (isFirstMessage) {
 			const cached = await env.garantia_cache.get(cacheKey);
-			if (cached) return Response.json({ reply: cached, cached: true }, { headers: CORS_HEADERS });
+			if (cached) return Response.json({ reply: await conLinksDeDrive(env, cached), cached: true }, { headers: CORS_HEADERS });
 		}
 
 		// 2. Generar embedding con Gemini
@@ -145,12 +175,13 @@ export async function handleChat(request, env) {
 		// 6. Llamar a Gemini
 		const reply = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
 
-		// 7. Guardar en caché por 1 hora
+		// 7. Guardar en caché por 1 hora — sin los links, así una republicación del
+		// mapa de Drive se refleja en las respuestas ya cacheadas.
 		if (isFirstMessage) {
 			await env.garantia_cache.put(cacheKey, reply, { expirationTtl: 3600 });
 		}
 
-		return Response.json({ reply, cached: false }, { headers: CORS_HEADERS });
+		return Response.json({ reply: await conLinksDeDrive(env, reply), cached: false }, { headers: CORS_HEADERS });
 	} catch (err) {
 		console.error('Error en handleChat:', err);
 		return Response.json({ error: 'Error interno. Intentá de nuevo.' }, { status: 500, headers: CORS_HEADERS });
@@ -527,6 +558,16 @@ function chatHTML() {
 
     .bubble.bot strong { font-weight: 700; }
 
+    /* Fuentes citadas: llevan al documento en Drive */
+    .bubble.bot a {
+    color: var(--red);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    }
+    .bubble.bot a:hover { color: var(--red-dark); }
+
     /* Separación entre secciones */
     .bubble.bot h1, .bubble.bot h2, .bubble.bot h3 {
     font-size: .88rem;
@@ -732,6 +773,12 @@ function chatHTML() {
                 gfm: true,       // GitHub Flavored Markdown
             });
             bubble.innerHTML = marked.parse(String(text || ''));
+            // Los links de las fuentes van a Drive: se abren aparte para no
+            // perder la conversación.
+            bubble.querySelectorAll('a').forEach(function (a) {
+                a.target = '_blank';
+                a.rel = 'noopener noreferrer';
+            });
             } catch (e) {
             // Fallback: mostrar como texto plano si marked falla
             bubble.textContent = text;

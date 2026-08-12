@@ -85,7 +85,8 @@ garantia-worker/
 │   ├── index.js          # Worker principal (chat + RAG + LLM + UI)
 │   ├── ingest.js         # Ingesta masiva de carpetas (PDF + Excel + DOCX)
 │   ├── ingest_file.js    # Ingesta de archivo individual
-│   └── google_auth.js    # Autorización OAuth de Google Drive (se corre una vez)
+│   ├── google_auth.js    # Autorización OAuth de Google Drive (se corre una vez)
+│   └── drive_upload.js   # Sube los documentos a Drive y publica el mapa de links
 ├── test/unit/            # Tests unitarios (vitest, sin credenciales)
 ├── docs/                 # Documentos de garantías (no incluido en git)
 ├── wrangler.jsonc        # Configuración de Cloudflare
@@ -186,6 +187,21 @@ Los IDs de los vectores son determinísticos (`archivo-fragmento`), así que re-
 `ingest.js` anota cada archivo terminado en `.ingest-checkpoint.json`, así que una corrida cortada retoma donde quedó en vez de volver a embeber todo. Ante un `429` de Gemini reintenta con backoff exponencial (5s, 10s, 20s, 40s, 80s) y, entre fragmento y fragmento, espera 700 ms para no pasarse del límite de 100 requests por minuto.
  
 > La cuota gratuita de Gemini corta a los 1.000 embeddings diarios y se resetea a la medianoche del Pacífico (4 de la mañana en Argentina). Si una corrida larga se queda sin cuota, se retoma al día siguiente sin repetir trabajo. Para rehacer todo desde cero hay que borrar el checkpoint.
+ 
+### 4b. Publicar los documentos en Drive (opcional)
+ 
+Sirve para que las fuentes citadas en el chat sean links abribles en vez de solo el nombre del archivo.
+ 
+```bash
+node src/google_auth.js      # una sola vez: autoriza y devuelve el refresh token
+node src/drive_upload.js ./docs
+```
+ 
+El primer comando abre el navegador y al final imprime `GOOGLE_REFRESH_TOKEN`, que va al `.env`. El segundo sube los documentos a la carpeta **GarantIA - Documentos**, los deja públicos de lectura y escribe el mapa nombre → URL en la clave `docs:urls` de KV. El Worker lee esa clave y convierte el archivo citado en un link; si el mapa no existe, responde igual con el nombre en texto plano.
+ 
+Se anota lo subido en `.drive-manifest.json`, así que volver a correrlo sube solo lo que falte. Para reescribir el mapa en KV sin subir nada: `node src/drive_upload.js --solo-mapa`.
+ 
+> Si la app de Google quedó en estado "Testing" en la consola, el refresh token vence a los 7 días. Publicarla en "In Production" para que no caduque.
  
 ### 5. Desarrollo local
  
