@@ -16,16 +16,10 @@
 			"index_name": "garantia-index-gemini"
 		}
 	],
-	"r2_buckets": [
-		{
-			"bucket_name": "garantia-docs",
-			"binding": "garantia_docs"
-		}
-	],
 	"kv_namespaces": [
 		{
 			"binding": "garantia_cache",
-			"id": "00d2cae85e8b4faba65d559d514e0639"
+			"id": "d1f39512c3204c818120f62cff06e8d4"
 		}
 	]
 }
