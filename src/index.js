@@ -605,19 +605,25 @@ function chatHTML() {
     .avatar.user-av { background: var(--black); }
     .msg-meta { display: flex; flex-direction: column; min-width: 0; max-width: 80%; }
     .bubble {
-      padding: 10px 13px; border-radius: 12px;
+      padding: 11px 14px; border-radius: 14px;
       font-size: .85rem; line-height: 1.55;
       white-space: pre-wrap; word-break: break-word;
     }
+    /* El texto del bot entra como markdown ya parseado a nodos, así que los saltos
+       de línea que quedan ENTRE los <p> y los <li> son separadores del HTML, no
+       parte del mensaje. Con pre-wrap se renderizaban como líneas en blanco y las
+       respuestas largas quedaban con el doble de aire del que corresponde.
+       El de usuario sí lo conserva: ahí el salto lo escribió la persona. */
     .bubble.bot {
       background: var(--white); color: var(--black);
       border: 1px solid var(--gray-border);
-      border-bottom-left-radius: 3px;
-      box-shadow: var(--shadow);
+      border-bottom-left-radius: 4px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.05);
+      white-space: normal;
     }
     .bubble.user {
       background: var(--red); color: #fff;
-      border-bottom-right-radius: 3px;
+      border-bottom-right-radius: 4px;
     }
     .bubble.cached::after { content: " ⚡"; font-size: .72rem; opacity: .6; }
     .msg-time {
@@ -728,41 +734,53 @@ function chatHTML() {
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
-    .bubble.bot p { margin: 0 0 5px; }
-    .bubble.bot p:last-child { margin-bottom: 0; }
+    /* ── Markdown de la respuesta ──
+       Un solo ritmo vertical: 8px entre bloques, 3px entre items de lista. Los
+       reset de primer y último hijo evitan el aire de más contra los bordes de
+       la burbuja, que es lo que hace que un mensaje corto parezca flotar. */
+    .bubble.bot > :first-child { margin-top: 0; }
+    .bubble.bot > :last-child { margin-bottom: 0; }
 
-    /* Listas sin espacio de párrafo entre items */
-    .bubble.bot ul, .bubble.bot ol {
-    padding-left: 16px;
-    margin: 4px 0 6px;
-    }
-    .bubble.bot li {
-    margin-bottom: 2px;
-    line-height: 1.45;
-    }
-    /* Esto es clave: marked envuelve cada item en <p> cuando hay líneas en blanco */
-    .bubble.bot li p {
-    margin: 0;
-    }
+    .bubble.bot p { margin: 0 0 8px; }
+
+    .bubble.bot ul, .bubble.bot ol { margin: 0 0 8px; padding-left: 18px; }
+    .bubble.bot li { margin-bottom: 3px; }
+    .bubble.bot li:last-child { margin-bottom: 0; }
+    /* marked envuelve cada item en <p> cuando el markdown trae líneas en blanco */
+    .bubble.bot li p { margin: 0; }
+    .bubble.bot li::marker { color: var(--red); }
+    .bubble.bot li > ul, .bubble.bot li > ol { margin: 3px 0 0; }
 
     .bubble.bot strong { font-weight: 700; }
 
     /* Fuentes citadas: llevan al documento en Drive */
     .bubble.bot a {
-    color: var(--red);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-    font-weight: 600;
-    overflow-wrap: anywhere;
+      color: var(--red);
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      font-weight: 600;
+      overflow-wrap: anywhere;
     }
     .bubble.bot a:hover { color: var(--red-dark); }
 
-    /* Separación entre secciones */
-    .bubble.bot h1, .bubble.bot h2, .bubble.bot h3 {
-    font-size: .88rem;
-    font-weight: 700;
-    margin: 8px 0 4px;
-    color: var(--black);
+    /* La línea de la fuente cierra el mensaje: va separada por un filete y en
+       cuerpo menor, para que se lea como pie y no como un párrafo más. */
+    .bubble.bot .fuente {
+      margin-top: 10px; padding-top: 8px;
+      border-top: 1px solid var(--gray-border);
+      font-size: .75rem; color: var(--gray-text);
+    }
+
+    .bubble.bot h1, .bubble.bot h2, .bubble.bot h3, .bubble.bot h4 {
+      font-size: .82rem;
+      font-weight: 700;
+      margin: 14px 0 6px;
+      color: var(--black);
+    }
+
+    .bubble.bot hr {
+      border: 0; border-top: 1px solid var(--gray-border);
+      margin: 12px 0;
     }
 
     .bubble.bot code {
@@ -981,6 +999,20 @@ function chatHTML() {
       // inerte hasta que uno decide adoptarlo.
       const doc = new DOMParser().parseFromString(html, 'text/html');
       limpiarNodo(doc.body);
+
+      // Los saltos de línea que marked deja ENTRE bloques llegan como nodos de
+      // texto vacíos. Con white-space normal no molestan, pero se van igual para
+      // que la burbuja no dependa de eso.
+      [...doc.body.childNodes]
+        .filter((n) => n.nodeType === Node.TEXT_NODE && !n.textContent.trim())
+        .forEach((n) => n.remove());
+
+      // La clase va DESPUÉS de limpiarNodo, que borra todos los atributos.
+      const ultimo = doc.body.lastElementChild;
+      if (ultimo && ultimo.textContent.trimStart().startsWith('📄')) {
+        ultimo.classList.add('fuente');
+      }
+
       return [...doc.body.childNodes];
     }
 
