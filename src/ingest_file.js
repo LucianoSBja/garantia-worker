@@ -29,11 +29,15 @@ const TOLERANCIA_LINEA = 0.35;
 // El pie de página legal de TASA se repite en todas las páginas de todos los
 // boletines. Como texto para búsqueda semántica es ruido puro: embebe parecido a
 // cualquier consulta y llegaba a ocupar 100 de las 400 palabras de un fragmento.
+// Los patrones van deliberadamente flojos: el mismo bloque legal aparece con
+// variantes ("este boletín" / "este documento", con y sin "de Concesionarios"),
+// y ser específico dejó pasar el pie de página en 8 de los 178 PDF.
 const LINEA_DESCARTABLE = [
   /sólo para fines informativos/i,
   /no es el destinatario original/i,
-  /contenida en este bolet[ií]n es confidencial/i,
-  /circulaci[óo]n interna de la red de Concesionarios/i,
+  /contenida en este (bolet[ií]n|documento) es confidencial/i,
+  /circulaci[óo]n interna de la red/i,
+  /revisi[óo]n, distribuci[óo]n o copia/i,
   /^TASA\s*[–-]\s*Toyota Argentina/i,
   /^\s*(Depto\.|Departamento)\s+Servicio al Cliente\s*$/i,
   /^\s*\d+\s+de\s+\d+\s*$/,
