@@ -77,6 +77,14 @@ Medido contra el índice real con consultas acumuladas: las que tienen respuesta
 
 Concatenar sube todos los scores, así que el umbral está atado a `construirConsulta`. Si cambia cuántos turnos se arrastran, hay que remedir.
 
+#### Las citas se validan contra el contexto
+
+`validarCitas()` reescribe la línea `📄 Basado en: …` dejando **solo** los archivos que efectivamente se le pasaron al modelo en ese turno (los `matches` sobre el umbral más los sugeridos). Si no queda ninguno, la línea se reemplaza por `AVISO_SIN_RESPALDO`.
+
+No es defensivo por las dudas: pasó en producción. Una consulta por ruido en la distribución recuperó únicamente fragmentos de ABI-515, y la respuesta —contenido genérico sobre plazos de garantía, que no está en ese boletín— cerró citando `Toyota 10 - T&C.pdf`, un archivo real del corpus que nunca estuvo en el contexto. Con la linkificación activa, esa cita inventada sale como link a Drive: el técnico abre el PDF, no encuentra lo que el bot afirmó, y el costo es la confianza en la herramienta.
+
+La validación corre **antes** de cachear y antes de linkificar, así que a KV nunca va una cita inventada. Falla cerrado: un bug acá pierde una cita legítima, no habilita una falsa.
+
 #### Sugerencias cuando no hay respuesta
 
 `fuentesUnicas()` saca los `MAX_SUGERENCIAS` (3) documentos más cercanos y se los pasa al modelo **en las dos ramas**, haya o no contexto sobre el umbral. Como quien decide si hay respuesta termina siendo el modelo y no el filtro, listarlos solo en la rama "sin resultados" dejaría al técnico sin referencia justo en el caso más común: score alto sobre un documento que no viene al caso. Los nombres salen linkeados solos, porque `conLinksDeDrive` matchea por nombre de archivo.
@@ -108,6 +116,8 @@ La cuota gratuita de Gemini corta a los 1.000 embeddings diarios y se resetea a 
 Formatos: `.pdf` (pdf2json, solo texto — no hay OCR), `.xlsx`/`.xls` (SheetJS), `.docx` (mammoth), `.pptx` (jszip + los `<a:t>` del XML de cada diapositiva). Ojo con SheetJS: el build ESM no trae `XLSX.readFile`, hay que leer a buffer y usar `XLSX.read(buf, { type: 'buffer' })`.
 
 **Filtro de VIN**: las planillas de anexos de campañas traen miles de filas de chasis. `VIN_RE` las descarta y en su lugar deja una línea con el total de vehículos alcanzados. Los vectores de VIN son ruido —cadenas aleatorias que embeben casi idéntico entre sí— y triplicaban el índice. La contrapartida es que el bot no puede responder "¿el chasis X entra en la campaña ABI-502?": eso es lookup exacto, no búsqueda semántica, y se resolvería con un mapa VIN→campaña en KV.
+
+**Pendiente conocido — el pie de página legal ensucia el retrieval**: todos los PDF de TASA repiten en cada página el bloque *"Este mensaje es sólo para fines informativos y no debe ser tomado como una declaración formal de Toyota Argentina S.A. …"*. Como se repite en todo el corpus, embebe parecido a cualquier consulta y se lleva lugares del `topK: 5`. Medido: una consulta por ruido en la distribución trajo 3 de 5 fragmentos que eran solo ese disclaimer. Arreglarlo es filtrarlo en los dos parsers de ingesta y re-indexar (~790 embeddings, entra en una tanda diaria de la cuota gratuita). No rompe respuestas, las empobrece.
 
 ## Secrets
 

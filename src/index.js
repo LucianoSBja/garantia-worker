@@ -83,6 +83,29 @@ function fuentesUnicas(matches, limite) {
 	return [...new Set(matches.map((m) => m.metadata?.source).filter(Boolean))].slice(0, limite);
 }
 
+// Aviso que reemplaza una cita inventada. Se prefiere una respuesta marcada como
+// sin respaldo antes que una que aparenta tenerlo.
+const AVISO_SIN_RESPALDO = '⚠️ Esta respuesta no sale de un documento de la base. Verificá con el responsable de garantías antes de aplicarla.';
+
+const CITA_RE = /^[ \t]*📄[ \t]*Basado en:[ \t]*(.+?)[ \t]*$/gm;
+
+// El modelo a veces cierra con "📄 Basado en: <archivo>" nombrando un documento
+// que nunca estuvo en el contexto: responde de conocimiento general y le pega
+// encima el nombre de un archivo que sí existe en el corpus. Verificado en
+// producción — una consulta por ruido en la distribución recuperó solo ABI-515 y
+// la respuesta citó Toyota 10 - T&C.pdf.
+//
+// Como la cita después se convierte en link a Drive, el técnico termina abriendo
+// un PDF que no dice lo que el bot afirmó, y eso es peor que no responder. Acá se
+// reescribe la línea dejando únicamente los archivos que sí se le pasaron.
+// Falla cerrado: un bug acá pierde una cita válida, no habilita una inventada.
+function validarCitas(reply, permitidos) {
+	return reply.replace(CITA_RE, (_linea, citado) => {
+		const validos = [...permitidos].filter((nombre) => citado.includes(nombre));
+		return validos.length > 0 ? `📄 Basado en: ${validos.join(', ')}` : AVISO_SIN_RESPALDO;
+	});
+}
+
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
 	'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -224,8 +247,11 @@ export async function handleChat(request, env) {
 			: `Pregunta: ${message}\n\nNo hay ningún documento en la base que responda esto.\n\n` +
 				`Si todavía te falta el modelo, el síntoma o el kilometraje, hacé UNA sola pregunta y terminá ahí.\n${siNoHay}`;
 
-		// 6. Llamar a Gemini
-		const reply = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
+		// 6. Llamar a Gemini y descartar las citas que no correspondan a un
+		// documento realmente entregado en este turno.
+		const generado = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
+		const permitidos = new Set([...matches.map((m) => m.metadata?.source).filter(Boolean), ...cercanos]);
+		const reply = validarCitas(generado, permitidos);
 
 		// 7. Guardar en caché por 1 hora — sin los links, así una republicación del
 		// mapa de Drive se refleja en las respuestas ya cacheadas.

@@ -127,7 +127,12 @@ describe('handleChat', () => {
 
 	it('convierte en link el documento citado cuando el mapa de Drive está publicado', async () => {
 		vi.stubGlobal('fetch', mockFetch({ reply: 'Sí, cubre.\n\n📄 Basado en: Toyota 10 - T&C.pdf' }));
-		const env = makeEnv({ docsUrls: { 'Toyota 10 - T&C.pdf': 'https://drive.google.com/file/d/abc/view' } });
+		// El documento tiene que estar entre los matches: si no, validarCitas borra
+		// la cita por inventada y no queda nada que linkificar.
+		const env = makeEnv({
+			matches: [{ score: 0.8, metadata: { source: 'Toyota 10 - T&C.pdf', text: 'cobertura' } }],
+			docsUrls: { 'Toyota 10 - T&C.pdf': 'https://drive.google.com/file/d/abc/view' },
+		});
 		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
 		const body = await res.json();
 
@@ -136,7 +141,10 @@ describe('handleChat', () => {
 
 	it('deja la respuesta intacta si el mapa de Drive todavía no se publicó', async () => {
 		vi.stubGlobal('fetch', mockFetch({ reply: '📄 Basado en: Toyota 10 - T&C.pdf' }));
-		const env = makeEnv({ docsUrls: null });
+		const env = makeEnv({
+			matches: [{ score: 0.8, metadata: { source: 'Toyota 10 - T&C.pdf', text: 'cobertura' } }],
+			docsUrls: null,
+		});
 		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
 
 		expect((await res.json()).reply).toBe('📄 Basado en: Toyota 10 - T&C.pdf');
@@ -271,6 +279,75 @@ describe('handleChat', () => {
 		expect(consulta).toContain('130.000 km');
 		// Las repreguntas del bot no son parte del caso y ensuciarían la búsqueda.
 		expect(consulta).not.toContain('¿Kilometraje?');
+	});
+
+	// Visto en producción: el contexto traía solo ABI-515 y la respuesta citó
+	// Toyota 10 - T&C.pdf, que nunca se le pasó. Como la cita se convierte en link
+	// a Drive, el técnico abre un PDF que no dice lo que el bot afirmó.
+	it('borra la cita cuando el archivo no estuvo en el contexto', async () => {
+		vi.stubGlobal(
+			'fetch',
+			mockFetch({ reply: 'La cobertura aplica por 60 meses.\n📄 Basado en: Toyota 10 - T&C.pdf' })
+		);
+		const env = makeEnv({
+			matches: [{ score: 0.78, metadata: { source: 'ABI-515.pdf', text: 'cadena de distribución' } }],
+		});
+		const res = await handleChat(makeRequest({ message: 'ruido en la distribución', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).not.toContain('Toyota 10 - T&C.pdf');
+		expect(body.reply).toContain('La cobertura aplica por 60 meses.');
+		expect(body.reply).toContain('no sale de un documento de la base');
+	});
+
+	it('conserva la cita cuando el archivo sí estuvo en el contexto', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Está cubierto.\n📄 Basado en: ABI-515.pdf' }));
+		const env = makeEnv({
+			matches: [{ score: 0.78, metadata: { source: 'ABI-515.pdf', text: 'cadena de distribución' } }],
+		});
+		const res = await handleChat(makeRequest({ message: 'ruido en la distribución', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).toContain('📄 Basado en: ABI-515.pdf');
+		expect(body.reply).not.toContain('no sale de un documento de la base');
+	});
+
+	// Si cita dos archivos y solo uno es real, se conserva el real en vez de tirar
+	// toda la cita: la respuesta igual tiene respaldo parcial.
+	it('deja solo los archivos válidos cuando la cita mezcla varios', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Respuesta.\n📄 Basado en: ABI-515.pdf y Toyota 10 - T&C.pdf' }));
+		const env = makeEnv({
+			matches: [{ score: 0.78, metadata: { source: 'ABI-515.pdf', text: 'cadena' } }],
+		});
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).toContain('📄 Basado en: ABI-515.pdf');
+		expect(body.reply).not.toContain('Toyota 10 - T&C.pdf');
+	});
+
+	// Los documentos sugeridos como "lo más parecido" no están en el contexto pero
+	// sí se le mostraron al modelo, así que nombrarlos es legítimo.
+	it('acepta como cita un documento ofrecido entre los más cercanos', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Mirá esto.\n📄 Basado en: ABI-501.pdf' }));
+		const env = makeEnv({
+			matches: [{ score: 0.7, metadata: { source: 'ABI-501.pdf', text: 'barra deportiva' } }],
+		});
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).toContain('📄 Basado en: ABI-501.pdf');
+	});
+
+	it('guarda en caché la respuesta ya validada, no la cruda', async () => {
+		vi.stubGlobal('fetch', mockFetch({ reply: 'Respuesta.\n📄 Basado en: Inventado.pdf' }));
+		const env = makeEnv({
+			matches: [{ score: 0.78, metadata: { source: 'ABI-515.pdf', text: 'cadena' } }],
+		});
+		await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		const [, guardado] = env.garantia_cache.put.mock.calls[0];
+		expect(guardado).not.toContain('Inventado.pdf');
 	});
 
 	it('sin historial, la consulta de búsqueda es el mensaje tal cual', async () => {
