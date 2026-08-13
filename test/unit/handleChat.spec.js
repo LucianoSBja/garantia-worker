@@ -425,6 +425,17 @@ describe('handleChat', () => {
 		expect(contents[0].parts[0].text).toBe('hilux srx 2020. pierde líquido');
 	});
 
+	// Con 512 las respuestas largas se cortaban a la mitad y se perdía la línea de
+	// la fuente, que va al final. La más larga medida usó 1131 tokens.
+	it('pide suficientes tokens de salida para una respuesta larga', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		await handleChat(makeRequest({ message: 'listame todo lo que cubre toyota 10', history: [] }), makeEnv());
+
+		const generacion = fetchMock.mock.calls.filter(([url]) => url.includes(':generateContent')).pop();
+		expect(JSON.parse(generacion[1].body).generationConfig.maxOutputTokens).toBeGreaterThanOrEqual(1200);
+	});
+
 	// Sin versión en la clave, un deploy que cambia el prompt sigue sirviendo por
 	// una hora las respuestas de la lógica anterior y parece no haber surtido efecto.
 	it('la clave de caché lleva la versión de la lógica de respuesta', async () => {

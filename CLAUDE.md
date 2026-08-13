@@ -126,7 +126,7 @@ La validación corre **antes** de cachear y antes de linkificar, así que a KV n
 El pipeline se migró de Workers AI (bge-m3 + Llama 3.1) a la API de Google AI Studio.
 
 - Embeddings: `gemini-embedding-001` a **768 dimensiones** (`outputDimensionality`).
-- Generación: `gemini-3.5-flash-lite`, temperature 0.2, maxOutputTokens 512.
+- Generación: `gemini-3.5-flash-lite`, temperature 0.2, `maxOutputTokens` en `MAX_TOKENS_RESPUESTA` (1536). Con 512 las respuestas largas se cortaban y perdían la cita, que va al final: la enumeración completa de coberturas de Toyota 10 usa hasta 1131 tokens.
 - Auth por header `x-goog-api-key` con `env.GOOGLE_API_KEY`. No hay binding `AI` en `wrangler.jsonc`.
 
 Tres detalles fáciles de romper:

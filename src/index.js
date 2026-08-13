@@ -30,13 +30,14 @@ const KV_KEY_DOCS = 'docs:urls';
 
 // Versión de la lógica de respuesta, que va en la clave del caché.
 //
-// SUBIRLA al tocar el SYSTEM_PROMPT, el prompt de reformulación o el pipeline de
-// búsqueda. Sin esto, las respuestas generadas con la lógica anterior se siguen
+// SUBIRLA al tocar el SYSTEM_PROMPT, el prompt de reformulación, el pipeline de
+// búsqueda o MAX_TOKENS_RESPUESTA. Sin esto, las respuestas generadas con la
+// lógica anterior —incluidas las que quedaron truncadas— se siguen
 // sirviendo hasta que vence el TTL de una hora, y el deploy parece no haber
 // tenido efecto: pasó con "decime todo lo que entra en toyota 10", que después
 // de arreglar la repregunta seguía devolviendo el pedido de modelo cacheado.
 // Las claves viejas no se borran, vencen solas.
-const VERSION_CACHE = 2;
+const VERSION_CACHE = 3;
 
 // Convierte en link cada nombre de archivo que el modelo haya citado. Se hace en
 // una sola pasada con una alternativa por documento: reemplazar de a uno haría
@@ -200,6 +201,17 @@ const GEMINI_EMBED_MODEL = 'gemini-embedding-001';
 const GEMINI_EMBED_DIMENSIONS = 768;
 const GEMINI_CHAT_MODEL = 'gemini-3.5-flash-lite';
 
+// Con 512 las respuestas largas se cortaban a la mitad y, peor, se perdía la
+// línea de la fuente, que va al final. Se veía en "listame todo lo que cubre el
+// programa Toyota 10": terminaba en "**Sistema de frenos" y sin cita.
+//
+// Medido sobre esa consulta, que es de las más largas que puede haber porque
+// enumera todos los sistemas cubiertos: 512 devuelve finishReason MAX_TOKENS,
+// y la respuesta completa usa entre 930 y 1131 tokens según la corrida. 1024
+// entra justo, así que el tope va en 1536 para tener margen. Como se factura por
+// token generado y no por el tope, subirlo no cuesta nada si la respuesta es corta.
+const MAX_TOKENS_RESPUESTA = 1536;
+
 async function embedText(env, text, taskType) {
 	const res = await fetch(`${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`, {
 		method: 'POST',
@@ -239,7 +251,7 @@ async function generateReply(env, systemPrompt, history, userPrompt) {
 		body: JSON.stringify({
 			systemInstruction: { parts: [{ text: systemPrompt }] },
 			contents,
-			generationConfig: { temperature: 0.2, maxOutputTokens: 512 },
+			generationConfig: { temperature: 0.2, maxOutputTokens: MAX_TOKENS_RESPUESTA },
 		}),
 	});
 	const data = await res.json();
