@@ -55,8 +55,8 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 ### Flujo de `handleChat`
 
 1. Cache KV — **solo si `history.length === 0`**. Key: `chat:${message.toLowerCase().slice(0,100)}`, TTL 1h.
-2. `construirConsulta()` arma el texto a buscar con los últimos `TURNOS_DE_CONTEXTO` (3) mensajes del usuario más el actual, y recién eso se embebe con `taskType: 'RETRIEVAL_QUERY'`.
-3. `VECTORIZE.query(embedding, { topK: 5, returnMetadata: 'all' })`.
+2. `construirConsulta()` arma el texto a buscar con los últimos `TURNOS_DE_CONTEXTO` (3) mensajes del usuario más el actual. Se busca dos veces: con ese texto y con el que devuelve `reformularConsulta()`, ambos embebidos con `taskType: 'RETRIEVAL_QUERY'`.
+3. `VECTORIZE.query(embedding, { topK: 5, returnMetadata: 'all' })` por cada consulta.
 4. Filtro por `score > UMBRAL_RELEVANCIA`.
 5. Generación con Gemini, historial incluido.
 6. Escritura a caché, otra vez solo si era el primer mensaje.
@@ -68,6 +68,24 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 El `SYSTEM_PROMPT` obliga a pedir modelo, síntoma y kilometraje **de a uno**. Con eso, al tercer turno el último mensaje del usuario es algo como `130.000 km, entrega 15/01/2020`: embeberlo solo a él tira justo los datos que describen el caso. Medido, la diferencia es total — una consulta de ruido en la distribución recuperaba `Toyota 10 - T&C.pdf` a 0.70 con el último mensaje, y `ABI-515` a 0.78 con el caso acumulado.
 
 El corte en tres turnos es para no arrastrar una consulta anterior ya cerrada. Solo entran los mensajes del usuario: las repreguntas del bot son ruido.
+
+#### Búsqueda doble: consulta cruda + consulta reescrita
+
+Cada turno hace **dos** búsquedas y une los resultados. Antes de buscar, `reformularConsulta()` le pide a Gemini que reescriba el caso al vocabulario de los documentos, y se busca con las dos redacciones.
+
+Existe porque el técnico escribe **síntomas** y los documentos de cobertura enumeran **componentes**. Medido: `pérdida de líquido en amortiguadores` no recuperaba la exclusión de Toyota 10 ni en el top-30, mientras que `los amortiguadores entran en garantía` la traía primera. Es la misma pregunta.
+
+Las dos búsquedas son **complementarias, no redundantes**: la cruda encuentra los boletines técnicos (que describen síntomas) y la reescrita los términos y condiciones (que enumeran piezas). Por eso el prompt prohíbe explícitamente mencionar el síntoma en la reescritura — una versión que lo incluía devolvía `amortiguadores pérdida de fluido garantía…` y volvía a caer en los boletines, perdiendo el documento que tenía la respuesta.
+
+Tres detalles que costaron medición:
+
+- **Sin ejemplos concretos de pieza en el prompt.** Una versión decía `nombrá el componente como un manual: "amortiguadores de suspensión"` y el modelo lo copiaba: un caso de vibración al frenar se reescribía como amortiguadores. El ejemplo de la regla "no cambies de tema" usa frenos justamente por no ser un componente frecuente en las consultas reales.
+- **Sin modelo ni kilometraje en la reescritura.** Agregando `srx 2020` a una consulta que funcionaba, los boletines de la barra deportiva de la SRX tapaban el documento general de T&C.
+- **Falla abierta.** Si la reformulación falla o vuelve vacía, queda solo la búsqueda cruda, que es el comportamiento anterior. Reformular solo puede sumar.
+
+El umbral se aplica a cada búsqueda **por separado** y recién después se unen los resultados (`unirMatches`): los scores salen de vectores de consulta distintos, así que compararlos entre sí no significa nada, pero cada uno contra su propio umbral sí. El contexto se corta en `MAX_FRAGMENTOS`.
+
+Costo: una generación y un embedding extra por turno. Verificado sobre 20 corridas (4 casos × 5): 20/20 recuperan el documento correcto.
 
 #### El umbral no separa limpio, y es a propósito
 

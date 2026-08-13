@@ -1,23 +1,32 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { handleChat } from '../../src/index.js';
 
-function mockFetch({ embedding = new Array(768).fill(0.01), reply = 'Respuesta generada por el modelo.' } = {}) {
+// Cada turno hace dos generaciones: primero reescribe la consulta para buscar y
+// después redacta la respuesta. Pasar reformulacion: '' simula que esa primera
+// falla, que es el caso en que solo tiene que quedar la búsqueda cruda.
+function mockFetch({ embedding = new Array(768).fill(0.01), reply = 'Respuesta generada por el modelo.', reformulacion = 'consulta reescrita' } = {}) {
+	let generaciones = 0;
 	return vi.fn(async (url) => {
 		if (url.includes(':embedContent')) {
 			return { ok: true, json: async () => ({ embedding: { values: embedding } }) };
 		}
 		if (url.includes(':generateContent')) {
-			return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: reply }] } }] }) };
+			const texto = generaciones++ === 0 ? reformulacion : reply;
+			return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: texto }] } }] }) };
 		}
 		throw new Error('URL de fetch inesperada: ' + url);
 	});
 }
 
 function makeEnv({ cachedReply = null, matches = [], docsUrls = null } = {}) {
+	// unirMatches deduplica por id, así que sin id todos los fragmentos colapsan
+	// en uno solo. Vectorize siempre devuelve id; los tests no tienen por qué
+	// escribirlo a mano salvo que estén probando justamente la deduplicación.
+	const conId = matches.map((m, i) => ({ id: `v${i}`, ...m }));
 	return {
 		GOOGLE_API_KEY: 'fake-key',
 		VECTORIZE: {
-			query: vi.fn(async () => ({ matches })),
+			query: vi.fn(async () => ({ matches: conId })),
 		},
 		garantia_cache: {
 			// El namespace guarda dos cosas distintas: las respuestas cacheadas bajo
@@ -83,7 +92,8 @@ describe('handleChat', () => {
 
 		expect(body.cached).toBe(false);
 		expect(body.reply).toBe('Respuesta generada por el modelo.');
-		expect(env.VECTORIZE.query).toHaveBeenCalledTimes(1);
+		// Dos búsquedas: la consulta cruda y la reescrita.
+		expect(env.VECTORIZE.query).toHaveBeenCalledTimes(2);
 		expect(env.garantia_cache.put).toHaveBeenCalledTimes(1);
 		expect(env.garantia_cache.put.mock.calls[0][1]).toBe('Respuesta generada por el modelo.');
 
@@ -117,8 +127,10 @@ describe('handleChat', () => {
 		];
 		await handleChat(makeRequest({ message: 'segunda pregunta', history }), env);
 
-		const generateCall = fetchMock.mock.calls.find(([url]) => url.includes(':generateContent'));
-		const generateBody = JSON.parse(generateCall[1].body);
+		// La última generación es la de la respuesta; la primera reescribe la consulta
+		// y no lleva historial.
+		const llamadas = fetchMock.mock.calls.filter(([url]) => url.includes(':generateContent'));
+		const generateBody = JSON.parse(llamadas[llamadas.length - 1][1].body);
 
 		expect(generateBody.contents[0]).toEqual({ role: 'user', parts: [{ text: 'primera pregunta' }] });
 		expect(generateBody.contents[1]).toEqual({ role: 'model', parts: [{ text: 'primera respuesta' }] });
@@ -176,12 +188,18 @@ describe('handleChat', () => {
 		expect(body.reply).toBe('📄 Basado en: [Toyota 10 - T&C.pdf](https://drive.google.com/file/d/abc/view)');
 	});
 
-	// Devuelve el texto del último turno que se le mandó a Gemini, que es donde
-	// handleChat arma el contexto o, si no hubo, el pedido de sugerencias.
+	// El prompt de la respuesta es el de la ÚLTIMA generación del turno: la primera
+	// es la reformulación de la consulta de búsqueda.
 	function ultimoPromptEnviado(fetchMock) {
-		const generateCall = fetchMock.mock.calls.find(([url]) => url.includes(':generateContent'));
-		const generateBody = JSON.parse(generateCall[1].body);
-		return generateBody.contents[generateBody.contents.length - 1].parts[0].text;
+		const llamadas = fetchMock.mock.calls.filter(([url]) => url.includes(':generateContent'));
+		const body = JSON.parse(llamadas[llamadas.length - 1][1].body);
+		return body.contents[body.contents.length - 1].parts[0].text;
+	}
+
+	function consultasBuscadas(fetchMock) {
+		return fetchMock.mock.calls
+			.filter(([url]) => url.includes(':embedContent'))
+			.map(([, opciones]) => JSON.parse(opciones.body).content.parts[0].text);
 	}
 
 	it('filtra matches de Vectorize con score bajo y responde igual sin contexto', async () => {
@@ -348,6 +366,63 @@ describe('handleChat', () => {
 
 		const [, guardado] = env.garantia_cache.put.mock.calls[0];
 		expect(guardado).not.toContain('Inventado.pdf');
+	});
+
+	// El técnico escribe síntomas y los documentos de cobertura hablan de
+	// componentes. Se busca con las dos redacciones porque cada una recupera cosas
+	// distintas: la cruda encuentra boletines técnicos, la reescrita los T&C.
+	it('busca dos veces: con la consulta cruda y con la reescrita', async () => {
+		const fetchMock = mockFetch({ reformulacion: 'amortiguadores de suspensión, cobertura de garantía' });
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv();
+		await handleChat(makeRequest({ message: 'pierde líquido el amortiguador', history: [] }), env);
+
+		expect(consultasBuscadas(fetchMock)).toEqual([
+			'pierde líquido el amortiguador',
+			'amortiguadores de suspensión, cobertura de garantía',
+		]);
+		expect(env.VECTORIZE.query).toHaveBeenCalledTimes(2);
+	});
+
+	// La reformulación es una mejora, no un requisito: si el modelo devuelve
+	// cualquier cosa, tiene que quedar el comportamiento anterior y no romperse.
+	it('si la reformulación sale vacía, busca solo con la consulta cruda', async () => {
+		const fetchMock = mockFetch({ reformulacion: '' });
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({ matches: [{ score: 0.8, metadata: { source: 'doc.pdf', text: 'contenido' } }] });
+		const res = await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		expect(consultasBuscadas(fetchMock)).toEqual(['consulta']);
+		expect(env.VECTORIZE.query).toHaveBeenCalledTimes(1);
+		expect((await res.json()).reply).toBe('Respuesta generada por el modelo.');
+	});
+
+	// Las dos búsquedas suelen traer fragmentos repetidos. Si se colaran duplicados
+	// al prompt, el mismo texto ocuparía dos lugares del contexto.
+	it('no repite en el contexto un fragmento que devolvieron las dos búsquedas', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({ matches: [{ score: 0.8, metadata: { source: 'doc.pdf', text: 'texto repetido' } }] });
+		await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		const prompt = ultimoPromptEnviado(fetchMock);
+		expect(prompt.match(/texto repetido/g)).toHaveLength(1);
+	});
+
+	it('la reformulación no arrastra el historial de la conversación', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv();
+		const history = [
+			{ role: 'user', content: 'hilux srx 2020' },
+			{ role: 'assistant', content: '¿Cuál es el síntoma?' },
+		];
+		await handleChat(makeRequest({ message: 'pierde líquido', history }), env);
+
+		const primera = fetchMock.mock.calls.filter(([url]) => url.includes(':generateContent'))[0];
+		const contents = JSON.parse(primera[1].body).contents;
+		expect(contents).toHaveLength(1);
+		expect(contents[0].parts[0].text).toBe('hilux srx 2020. pierde líquido');
 	});
 
 	it('sin historial, la consulta de búsqueda es el mensaje tal cual', async () => {

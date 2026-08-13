@@ -83,6 +83,68 @@ function fuentesUnicas(matches, limite) {
 	return [...new Set(matches.map((m) => m.metadata?.source).filter(Boolean))].slice(0, limite);
 }
 
+// Tope de fragmentos que van al prompt cuando las dos búsquedas aportan. Con 8
+// el contexto sigue entrando cómodo en la ventana y no diluye la pregunta.
+const MAX_FRAGMENTOS = 8;
+
+// Reescribe el caso del técnico al vocabulario de los documentos.
+//
+// Hace falta porque el técnico escribe síntomas y los documentos de cobertura
+// hablan de componentes. Medido: "pérdida de líquido en amortiguadores" no
+// recupera la exclusión de Toyota 10 ni en el top-30, mientras que "los
+// amortiguadores entran en garantía" la trae primera. Son la misma pregunta.
+//
+// La regla de no incluir modelo ni kilometraje también salió de la medición:
+// agregando "srx 2020" a una consulta que funcionaba, los boletines de la barra
+// deportiva de la SRX tapaban el documento general de términos y condiciones.
+//
+// Las reglas van sin ejemplo concreto de pieza a propósito. Una versión anterior
+// decía 'nombrá el componente como un manual: "amortiguadores de suspensión"' y
+// el modelo lo copiaba: un caso de vibración al frenar se reescribía como
+// amortiguadores. La regla de no cambiar de tema usa frenos justamente porque no
+// es ninguno de los componentes que aparecen seguido en las consultas reales.
+const PROMPT_REFORMULACION = `Convertís el caso de un técnico de taller en una consulta de búsqueda sobre documentos de garantía Toyota.
+
+Reglas:
+- Nombrá la pieza o el sistema del que habla el caso con el término que usaría un manual, no con la palabra coloquial del taller
+- No cambies de tema: si el caso habla de frenos, la consulta habla de frenos
+- NO describas el síntoma ni la falla. Nada de ruidos, pérdidas, fugas, vibraciones ni roturas
+- NO incluyas modelo, versión, año ni kilometraje
+- Cerrá siempre con: garantía cobertura exclusiones componentes de mantenimiento y desgaste
+- Respondé UNA sola línea, sin comillas ni explicación`;
+
+async function reformularConsulta(env, consulta) {
+	try {
+		const texto = await generateReply(env, PROMPT_REFORMULACION, [], consulta);
+		const linea = (texto || '').trim().split('\n')[0].trim().slice(0, 200);
+		return linea.length >= 3 ? linea : null;
+	} catch (err) {
+		// La reformulación es una mejora, no un requisito: si falla, queda la
+		// búsqueda con la consulta cruda, que es lo que había antes.
+		console.error('No se pudo reformular la consulta:', err);
+		return null;
+	}
+}
+
+async function buscarFragmentos(env, consulta) {
+	const embedding = await embedText(env, consulta, 'RETRIEVAL_QUERY');
+	const res = await env.VECTORIZE.query(embedding, { topK: 5, returnMetadata: 'all' });
+	return res.matches || [];
+}
+
+// Une los resultados de las dos búsquedas quedándose con el mejor score de cada
+// fragmento. El umbral se aplica a cada búsqueda por separado y recién después se
+// unen: los scores salen de vectores de consulta distintos, así que compararlos
+// entre sí no significa nada, pero cada uno contra su propio umbral sí.
+function unirMatches(...listas) {
+	const porId = new Map();
+	for (const m of listas.flat()) {
+		const previo = porId.get(m.id);
+		if (!previo || m.score > previo.score) porId.set(m.id, m);
+	}
+	return [...porId.values()].sort((a, b) => b.score - a.score);
+}
+
 // Aviso que reemplaza una cita inventada. Se prefiere una respuesta marcada como
 // sin respaldo antes que una que aparenta tenerlo.
 const AVISO_SIN_RESPALDO = '⚠️ Esta respuesta no sale de un documento de la base. Verificá con el responsable de garantías antes de aplicarla.';
@@ -206,26 +268,40 @@ export async function handleChat(request, env) {
 			if (cached) return Response.json({ reply: await conLinksDeDrive(env, cached), cached: true }, { headers: CORS_HEADERS });
 		}
 
-		// 2. Generar embedding con Gemini — sobre el caso acumulado, no solo el
-		// último mensaje (ver construirConsulta).
-		const embedding = await embedText(env, construirConsulta(message, history), 'RETRIEVAL_QUERY');
+		// 2. Búsqueda doble: la consulta cruda y otra reescrita al vocabulario de
+		// los documentos. Las dos redacciones recuperan cosas distintas y las dos
+		// hacen falta — la cruda encuentra los boletines técnicos, que describen
+		// síntomas, y la reformulada encuentra los términos y condiciones, que
+		// enumeran componentes. Buscar con las dos hace que reformular solo pueda
+		// sumar: si el modelo devuelve cualquier cosa, la búsqueda cruda sigue ahí.
+		const consulta = construirConsulta(message, history);
+		const reformulada = await reformularConsulta(env, consulta);
 
-		// 3. Buscar en Vectorize
-		const vectorResults = await env.VECTORIZE.query(embedding, {
-			topK: 5,
-			returnMetadata: 'all',
-		});
+		const [crudos, reformulados] = await Promise.all([
+			buscarFragmentos(env, consulta),
+			reformulada ? buscarFragmentos(env, reformulada) : Promise.resolve([]),
+		]);
 
-		const encontrados = vectorResults.matches || [];
-		const matches = encontrados.filter((m) => m.score > UMBRAL_RELEVANCIA);
+		const encontrados = unirMatches(crudos, reformulados);
+		const matches = unirMatches(
+			crudos.filter((m) => m.score > UMBRAL_RELEVANCIA),
+			reformulados.filter((m) => m.score > UMBRAL_RELEVANCIA)
+		).slice(0, MAX_FRAGMENTOS);
 
-		console.log('Vectorize matches:', JSON.stringify(encontrados.map((m) => ({ score: m.score, source: m.metadata?.source }))));
+		console.log(
+			'Búsqueda:',
+			JSON.stringify({
+				reformulada,
+				cruda: crudos.map((m) => ({ score: m.score, source: m.metadata?.source })),
+				reescrita: reformulados.map((m) => ({ score: m.score, source: m.metadata?.source })),
+			})
+		);
 
-		// 4. Armar contexto — solo con los fragmentos por encima del umbral
+		// 3. Armar contexto — solo con los fragmentos por encima del umbral
 		const context =
 			matches.length > 0 ? matches.map((m) => `[${m.metadata?.source || 'Documento'}]\n${m.metadata?.text || ''}`).join('\n\n') : '';
 
-		// 5. Armar el prompt del turno.
+		// 4. Armar el prompt del turno.
 		//
 		// Los documentos más cercanos se ofrecen haya o no contexto por encima del
 		// umbral. Como los rangos de score se solapan, quien termina decidiendo si
@@ -247,13 +323,13 @@ export async function handleChat(request, env) {
 			: `Pregunta: ${message}\n\nNo hay ningún documento en la base que responda esto.\n\n` +
 				`Si todavía te falta el modelo, el síntoma o el kilometraje, hacé UNA sola pregunta y terminá ahí.\n${siNoHay}`;
 
-		// 6. Llamar a Gemini y descartar las citas que no correspondan a un
+		// 5. Llamar a Gemini y descartar las citas que no correspondan a un
 		// documento realmente entregado en este turno.
 		const generado = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
 		const permitidos = new Set([...matches.map((m) => m.metadata?.source).filter(Boolean), ...cercanos]);
 		const reply = validarCitas(generado, permitidos);
 
-		// 7. Guardar en caché por 1 hora — sin los links, así una republicación del
+		// 6. Guardar en caché por 1 hora — sin los links, así una republicación del
 		// mapa de Drive se refleja en las respuestas ya cacheadas.
 		if (isFirstMessage) {
 			await env.garantia_cache.put(cacheKey, reply, { expirationTtl: 3600 });
