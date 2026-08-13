@@ -21,6 +21,24 @@ const GEMINI_EMBED_DIMENSIONS = 768;
 // Un VIN es alfanumérico de 17 caracteres, sin I, O ni Q.
 const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/;
 
+// Dos fragmentos están en el mismo renglón si su Y difiere menos que esto.
+// pdf2json usa una unidad propia donde ~1 es la altura de línea, así que 0.35
+// tolera superíndices y viñetas sin llegar a fusionar renglones consecutivos.
+const TOLERANCIA_LINEA = 0.35;
+
+// El pie de página legal de TASA se repite en todas las páginas de todos los
+// boletines. Como texto para búsqueda semántica es ruido puro: embebe parecido a
+// cualquier consulta y llegaba a ocupar 100 de las 400 palabras de un fragmento.
+const LINEA_DESCARTABLE = [
+  /sólo para fines informativos/i,
+  /no es el destinatario original/i,
+  /contenida en este bolet[ií]n es confidencial/i,
+  /circulaci[óo]n interna de la red de Concesionarios/i,
+  /^TASA\s*[–-]\s*Toyota Argentina/i,
+  /^\s*(Depto\.|Departamento)\s+Servicio al Cliente\s*$/i,
+  /^\s*\d+\s+de\s+\d+\s*$/,
+];
+
 // El free tier de embeddings permite 100 requests por minuto. Vamos a ~85 para
 // dejar margen, y ante un 429 esperamos cada vez más antes de reintentar.
 const PAUSA_MS       = 700;
@@ -35,10 +53,58 @@ function makeId(fileName, chunk) {
 }
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
+// Reconstruye el orden de lectura de una página desde las coordenadas de cada
+// fragmento: primero agrupa por Y en renglones y después ordena cada renglón por X.
+//
+// Hace falta porque getRawTextContent() devuelve los bloques en el orden en que el
+// PDF los guardó, que no es el de lectura: los boletines salían empezando por el
+// pie de página legal, sin el encabezado (modelo, N° de boletín, tema, fecha) y con
+// las secciones numeradas al revés. El texto quedaba indexado desordenado, así que
+// el embedding era peor y el modelo no podía responder ni con el documento correcto.
+// pdf2json entrega el texto percent-encoded, pero algunos boletines traen un "%"
+// suelto que no es un escape válido y hace explotar decodeURIComponent. Sin esto
+// el archivo entero se pierde: en ingest.js lo tapa el try/catch de ingestFile y
+// en ingest_file.js corta la corrida.
+function decodificar(texto) {
+  try {
+    return decodeURIComponent(texto);
+  } catch {
+    return texto;
+  }
+}
+
+function ordenarPagina(pagina) {
+  const items = (pagina.Texts || []).map((t) => ({
+    x: t.x,
+    y: t.y,
+    s: decodificar(t.R.map((r) => r.T).join("")),
+  }));
+
+  const lineas = [];
+  for (const item of items.sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const ultima = lineas[lineas.length - 1];
+    if (ultima && Math.abs(ultima.y - item.y) <= TOLERANCIA_LINEA) ultima.items.push(item);
+    else lineas.push({ y: item.y, items: [item] });
+  }
+
+  return lineas
+    .map((l) =>
+      l.items
+        .sort((a, b) => a.x - b.x)
+        // Sin separador a propósito: pdf2json parte las palabras en varios
+        // fragmentos ("Pos" "t" "venta") y los espacios reales ya vienen adentro.
+        .map((i) => i.s)
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter((texto) => texto && !LINEA_DESCARTABLE.some((re) => re.test(texto)));
+}
+
 function parsePDF(filePath) {
   return new Promise((resolve, reject) => {
     const parser = new PDFParser(null, 1);
-    parser.on("pdfParser_dataReady", () => resolve(parser.getRawTextContent()));
+    parser.on("pdfParser_dataReady", (data) => resolve((data.Pages || []).map((p) => ordenarPagina(p).join("\n")).join("\n")));
     parser.on("pdfParser_dataError", (err) => reject(new Error(err.parserError)));
     parser.loadPDF(filePath);
   });

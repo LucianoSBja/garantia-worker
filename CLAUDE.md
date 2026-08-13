@@ -117,7 +117,15 @@ Formatos: `.pdf` (pdf2json, solo texto — no hay OCR), `.xlsx`/`.xls` (SheetJS)
 
 **Filtro de VIN**: las planillas de anexos de campañas traen miles de filas de chasis. `VIN_RE` las descarta y en su lugar deja una línea con el total de vehículos alcanzados. Los vectores de VIN son ruido —cadenas aleatorias que embeben casi idéntico entre sí— y triplicaban el índice. La contrapartida es que el bot no puede responder "¿el chasis X entra en la campaña ABI-502?": eso es lookup exacto, no búsqueda semántica, y se resolvería con un mapa VIN→campaña en KV.
 
-**Pendiente conocido — el pie de página legal ensucia el retrieval**: todos los PDF de TASA repiten en cada página el bloque *"Este mensaje es sólo para fines informativos y no debe ser tomado como una declaración formal de Toyota Argentina S.A. …"*. Como se repite en todo el corpus, embebe parecido a cualquier consulta y se lleva lugares del `topK: 5`. Medido: una consulta por ruido en la distribución trajo 3 de 5 fragmentos que eran solo ese disclaimer. Arreglarlo es filtrarlo en los dos parsers de ingesta y re-indexar (~790 embeddings, entra en una tanda diaria de la cuota gratuita). No rompe respuestas, las empobrece.
+**Orden de lectura de los PDF**: `pdf2json.getRawTextContent()` devuelve los bloques en el orden en que el PDF los guardó, que **no** es el de lectura. Los boletines salían empezando por el pie de página legal, sin el encabezado (modelo, N° de boletín, tema, fecha) y con las secciones numeradas al revés. `ordenarPagina()` lo reconstruye desde las coordenadas: agrupa por `y` en renglones con `TOLERANCIA_LINEA` y ordena cada uno por `x`.
+
+Dentro de un renglón los fragmentos se unen **sin separador**, a propósito: pdf2json parte las palabras (`"Pos" "t" "venta"`) y los espacios reales ya vienen adentro de cada fragmento. Poner `' '` rompe todas las palabras partidas.
+
+`decodificar()` envuelve `decodeURIComponent` en un try/catch porque algunos boletines traen un `%` suelto que no es un escape válido. Sin eso el archivo entero se pierde: en `ingest.js` lo tapa el `try/catch` de `ingestFile` y en `ingest_file.js` corta la corrida.
+
+**Filtro del pie de página**: `LINEA_DESCARTABLE` descarta el bloque legal de TASA, que se repite en todas las páginas de todos los boletines. Embebe parecido a cualquier consulta y llegaba a ocupar 100 de las 400 palabras de un fragmento. El filtro es por renglón y corre después de reconstruir el orden — antes no serviría, porque el disclaimer viene entreverado con el contenido.
+
+Medido sobre los 178 PDF del corpus: 230.591 palabras antes, 189.183 después (18% menos), 0 errores.
 
 ## Secrets
 
