@@ -55,13 +55,31 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 ### Flujo de `handleChat`
 
 1. Cache KV — **solo si `history.length === 0`**. Key: `chat:${message.toLowerCase().slice(0,100)}`, TTL 1h.
-2. Embedding de la consulta con `taskType: 'RETRIEVAL_QUERY'`.
+2. `construirConsulta()` arma el texto a buscar con los últimos `TURNOS_DE_CONTEXTO` (3) mensajes del usuario más el actual, y recién eso se embebe con `taskType: 'RETRIEVAL_QUERY'`.
 3. `VECTORIZE.query(embedding, { topK: 5, returnMetadata: 'all' })`.
-4. Filtro por `score > 0.55`. Sin matches, el prompt le indica explícitamente al modelo que responda "No encontré información...".
+4. Filtro por `score > UMBRAL_RELEVANCIA`.
 5. Generación con Gemini, historial incluido.
 6. Escritura a caché, otra vez solo si era el primer mensaje.
 
 `handleChat` se exporta (aparte del `export default`) exclusivamente para poder testearla sin levantar el runtime de Workers.
+
+#### La búsqueda va sobre el caso acumulado, no sobre el último mensaje
+
+El `SYSTEM_PROMPT` obliga a pedir modelo, síntoma y kilometraje **de a uno**. Con eso, al tercer turno el último mensaje del usuario es algo como `130.000 km, entrega 15/01/2020`: embeberlo solo a él tira justo los datos que describen el caso. Medido, la diferencia es total — una consulta de ruido en la distribución recuperaba `Toyota 10 - T&C.pdf` a 0.70 con el último mensaje, y `ABI-515` a 0.78 con el caso acumulado.
+
+El corte en tres turnos es para no arrastrar una consulta anterior ya cerrada. Solo entran los mensajes del usuario: las repreguntas del bot son ruido.
+
+#### El umbral no separa limpio, y es a propósito
+
+Medido contra el índice real con consultas acumuladas: las que tienen respuesta puntúan **0.727–0.800** y las que no, **0.694–0.740**. **Los rangos se solapan**, así que no existe un corte que discrimine — el acierto más flojo cae por debajo del peor falso positivo.
+
+`UMBRAL_RELEVANCIA = 0.72` va apenas debajo del acierto más flojo a propósito: un falso positivo lo descarta el modelo, que igual tiene que decidir si el contexto responde; un falso negativo pierde en silencio un documento útil. **No subirlo "para filtrar mejor"** sin volver a medir: el número anterior (0.55) estaba tan abajo que la rama sin contexto no se ejecutaba nunca.
+
+Concatenar sube todos los scores, así que el umbral está atado a `construirConsulta`. Si cambia cuántos turnos se arrastran, hay que remedir.
+
+#### Sugerencias cuando no hay respuesta
+
+`fuentesUnicas()` saca los `MAX_SUGERENCIAS` (3) documentos más cercanos y se los pasa al modelo **en las dos ramas**, haya o no contexto sobre el umbral. Como quien decide si hay respuesta termina siendo el modelo y no el filtro, listarlos solo en la rama "sin resultados" dejaría al técnico sin referencia justo en el caso más común: score alto sobre un documento que no viene al caso. Los nombres salen linkeados solos, porque `conLinksDeDrive` matchea por nombre de archivo.
 
 ### Gemini, no Workers AI
 

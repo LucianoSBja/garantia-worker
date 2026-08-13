@@ -13,7 +13,7 @@ Solo cuando tenés modelo + síntoma + kilometraje, respondé con los detalles.
 - Cuando des información de garantía, terminá con una línea así, con el nombre real del archivo y sin corchetes:
   📄 Basado en: NOMBRE DEL ARCHIVO.pdf
 - Si estás repreguntando en vez de responder, NO cites ningún archivo
-- Si no hay información: "No encontré datos sobre esto. Consultá con el responsable de garantías."`;
+- Si no hay información: "No encontré datos sobre esto. Consultá con el responsable de garantías.", y si el turno te pasa documentos parecidos, listalos abajo con el nombre de archivo tal cual`;
 
 // Mapa nombre de archivo -> URL de Drive, que publica src/drive_upload.js.
 const KV_KEY_DOCS = 'docs:urls';
@@ -43,6 +43,44 @@ async function conLinksDeDrive(env, reply) {
 		console.error('No se pudo aplicar el mapa de Drive:', err);
 		return reply;
 	}
+}
+
+// Umbral de relevancia de un fragmento. Medido contra el índice real con
+// consultas acumuladas (las que arma construirConsulta): las que tienen respuesta
+// en la base puntúan 0.727–0.800 y las que no, 0.694–0.740. Los rangos se
+// solapan, así que NO hay un corte que separe limpio: cualquier valor ahí adentro
+// pierde respuestas buenas o deja entrar ruido.
+//
+// Se elige errar por incluir. Un falso positivo lo descarta el modelo, que igual
+// tiene que decidir si el contexto responde la pregunta; un falso negativo, en
+// cambio, pierde en silencio un documento que sí servía. Por eso el corte va
+// apenas debajo del acierto más flojo medido (0.727) y no en el medio.
+// Atado a este modelo de embeddings y a este corpus: si cambia alguno, remedir.
+const UMBRAL_RELEVANCIA = 0.72;
+
+// Cuántos documentos se ofrecen como "lo más parecido" cuando no hay nada por
+// encima del umbral.
+const MAX_SUGERENCIAS = 3;
+
+// Cuántos turnos del usuario se arrastran a la búsqueda. El prompt repregunta
+// hasta tres veces (modelo, síntoma, kilometraje), así que con tres alcanza para
+// reconstruir el caso sin arrastrar una consulta anterior ya cerrada.
+const TURNOS_DE_CONTEXTO = 3;
+
+// La búsqueda va sobre el caso acumulado, no sobre el último mensaje. Como el
+// prompt obliga a pedir modelo, síntoma y kilometraje de a uno, al tercer turno
+// el último mensaje suele ser "130.000 km, entrega 15/01/2020" — que como
+// consulta semántica no recupera nada útil y descarta lo que el técnico ya dijo.
+function construirConsulta(message, history) {
+	const previos = history
+		.filter((m) => m.role === 'user')
+		.slice(-TURNOS_DE_CONTEXTO)
+		.map((m) => m.content);
+	return [...previos, message].join('. ');
+}
+
+function fuentesUnicas(matches, limite) {
+	return [...new Set(matches.map((m) => m.metadata?.source).filter(Boolean))].slice(0, limite);
 }
 
 const CORS_HEADERS = {
@@ -145,8 +183,9 @@ export async function handleChat(request, env) {
 			if (cached) return Response.json({ reply: await conLinksDeDrive(env, cached), cached: true }, { headers: CORS_HEADERS });
 		}
 
-		// 2. Generar embedding con Gemini
-		const embedding = await embedText(env, message, 'RETRIEVAL_QUERY');
+		// 2. Generar embedding con Gemini — sobre el caso acumulado, no solo el
+		// último mensaje (ver construirConsulta).
+		const embedding = await embedText(env, construirConsulta(message, history), 'RETRIEVAL_QUERY');
 
 		// 3. Buscar en Vectorize
 		const vectorResults = await env.VECTORIZE.query(embedding, {
@@ -154,23 +193,36 @@ export async function handleChat(request, env) {
 			returnMetadata: 'all',
 		});
 
-		const matches = (vectorResults.matches || []).filter((m) => m.score > 0.55);
+		const encontrados = vectorResults.matches || [];
+		const matches = encontrados.filter((m) => m.score > UMBRAL_RELEVANCIA);
 
-        console.log(
-            'Vectorize matches:',
-            JSON.stringify((vectorResults.matches || []).map((m) => ({ score: m.score, source: m.metadata?.source }))),
-        );
+		console.log('Vectorize matches:', JSON.stringify(encontrados.map((m) => ({ score: m.score, source: m.metadata?.source }))));
 
-        // 4. Armar contexto — solo con matches relevantes (score > 0.55)
-        let context = '';
-        if (matches.length > 0) {
-            context = matches.map((m) => `[${m.metadata?.source || 'Documento'}]\n${m.metadata?.text || ''}`).join('\n\n');
-        }
+		// 4. Armar contexto — solo con los fragmentos por encima del umbral
+		const context =
+			matches.length > 0 ? matches.map((m) => `[${m.metadata?.source || 'Documento'}]\n${m.metadata?.text || ''}`).join('\n\n') : '';
 
-		// 5. Armar prompt para Llama
+		// 5. Armar el prompt del turno.
+		//
+		// Los documentos más cercanos se ofrecen haya o no contexto por encima del
+		// umbral. Como los rangos de score se solapan, quien termina decidiendo si
+		// hay respuesta es el modelo, no el filtro: si se listaran solo en la rama
+		// "sin resultados", el técnico se quedaría sin referencia justo en el caso
+		// más común, que es un score alto sobre un documento que no viene al caso.
+		// Los nombres salen linkeados solos: conLinksDeDrive matchea por archivo.
+		const cercanos = fuentesUnicas(encontrados, MAX_SUGERENCIAS);
+		const siNoHay =
+			cercanos.length > 0
+				? 'Si el contexto no responde la pregunta, escribí "No encontré datos sobre esto. Consultá con el responsable de garantías.",' +
+					' después una línea "Lo más parecido que hay en la base:" y debajo estos nombres tal cual, uno por línea con guión:\n' +
+					cercanos.map((n) => `- ${n}`).join('\n')
+				: 'Si el contexto no responde la pregunta, escribí: "No encontré datos sobre esto. Consultá con el responsable de garantías."';
+
 		const userPrompt = context
-			? `Contexto de documentos:\n${context}\n\n---\nPregunta: ${message}\n\nRecordá: si te falta modelo, síntoma o kilometraje, hacé UNA sola pregunta antes de responder.`
-			: `Pregunta: ${message}\n\nNo hay documentos relevantes. Respondé: "No encontré información sobre esto. Consultá con el responsable de garantías."`;
+			? `Contexto de documentos:\n${context}\n\n---\nPregunta: ${message}\n\n` +
+				`Si te falta modelo, síntoma o kilometraje, hacé UNA sola pregunta antes de responder.\n${siNoHay}`
+			: `Pregunta: ${message}\n\nNo hay ningún documento en la base que responda esto.\n\n` +
+				`Si todavía te falta el modelo, el síntoma o el kilometraje, hacé UNA sola pregunta y terminá ahí.\n${siNoHay}`;
 
 		// 6. Llamar a Gemini
 		const reply = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';

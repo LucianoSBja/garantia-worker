@@ -168,6 +168,14 @@ describe('handleChat', () => {
 		expect(body.reply).toBe('📄 Basado en: [Toyota 10 - T&C.pdf](https://drive.google.com/file/d/abc/view)');
 	});
 
+	// Devuelve el texto del último turno que se le mandó a Gemini, que es donde
+	// handleChat arma el contexto o, si no hubo, el pedido de sugerencias.
+	function ultimoPromptEnviado(fetchMock) {
+		const generateCall = fetchMock.mock.calls.find(([url]) => url.includes(':generateContent'));
+		const generateBody = JSON.parse(generateCall[1].body);
+		return generateBody.contents[generateBody.contents.length - 1].parts[0].text;
+	}
+
 	it('filtra matches de Vectorize con score bajo y responde igual sin contexto', async () => {
 		const fetchMock = mockFetch();
 		vi.stubGlobal('fetch', fetchMock);
@@ -179,9 +187,99 @@ describe('handleChat', () => {
 
 		expect(body.reply).toBe('Respuesta generada por el modelo.');
 
-		const generateCall = fetchMock.mock.calls.find(([url]) => url.includes(':generateContent'));
-		const generateBody = JSON.parse(generateCall[1].body);
-		const lastMessage = generateBody.contents[generateBody.contents.length - 1];
-		expect(lastMessage.parts[0].text).toContain('No hay documentos relevantes');
+		const prompt = ultimoPromptEnviado(fetchMock);
+		expect(prompt).toContain('No hay ningún documento en la base que responda esto');
+		expect(prompt).not.toContain('poco relevante');
+	});
+
+	// El umbral se subió de 0.55 a 0.72 midiendo contra el índice real. El acierto
+	// más flojo medido puntuó 0.727, así que el corte va apenas debajo: se prefiere
+	// dejar entrar ruido —que el modelo descarta— antes que perder un documento útil.
+	it('deja pasar un match de 0.727 y descarta uno de 0.70', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({
+			matches: [
+				{ score: 0.727, metadata: { source: 'sirve.pdf', text: 'contenido que sirve' } },
+				{ score: 0.7, metadata: { source: 'no-sirve.pdf', text: 'contenido que no sirve' } },
+			],
+		});
+		await handleChat(makeRequest({ message: 'consulta', history: [] }), env);
+
+		const prompt = ultimoPromptEnviado(fetchMock);
+		expect(prompt).toContain('contenido que sirve');
+		expect(prompt).not.toContain('contenido que no sirve');
+	});
+
+	// Los rangos de score de aciertos y de falsos positivos se solapan, así que el
+	// modelo puede recibir contexto y aun así no poder responder. En ese caso el
+	// técnico tiene que llevarse igual la referencia.
+	it('ofrece los documentos más cercanos también cuando sí hay contexto', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({
+			matches: [{ score: 0.74, metadata: { source: 'ABI-501.pdf', text: 'barra deportiva' } }],
+		});
+		await handleChat(makeRequest({ message: 'pérdida de líquido en amortiguadores', history: [] }), env);
+
+		const prompt = ultimoPromptEnviado(fetchMock);
+		expect(prompt).toContain('barra deportiva');
+		expect(prompt).toContain('Lo más parecido que hay en la base');
+		expect(prompt).toContain('- ABI-501.pdf');
+	});
+
+	it('ofrece los documentos más cercanos cuando no hay nada por encima del umbral', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({
+			matches: [
+				{ score: 0.71, metadata: { source: 'ABI-501.pdf', text: 'barra deportiva' } },
+				{ score: 0.7, metadata: { source: 'ABI-501.pdf', text: 'otro fragmento del mismo' } },
+				{ score: 0.69, metadata: { source: 'ABI-502-C.pdf', text: 'campaña' } },
+			],
+		});
+		await handleChat(makeRequest({ message: 'pérdida de líquido en amortiguadores', history: [] }), env);
+
+		const prompt = ultimoPromptEnviado(fetchMock);
+		expect(prompt).toContain('Lo más parecido que hay en la base');
+		expect(prompt).toContain('- ABI-501.pdf');
+		expect(prompt).toContain('- ABI-502-C.pdf');
+		// El mismo documento aparece en dos fragmentos y se sugiere una sola vez.
+		expect(prompt.match(/- ABI-501\.pdf/g)).toHaveLength(1);
+	});
+
+	// El bot repregunta modelo, síntoma y kilometraje de a uno, así que el último
+	// mensaje suele ser el menos informativo de la conversación. Buscar solo con
+	// ese descarta justo lo que el técnico ya había contado.
+	it('busca con el caso acumulado y no solo con el último mensaje', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv();
+		const history = [
+			{ role: 'user', content: 'hilux srx 2020' },
+			{ role: 'assistant', content: '¿Cuál es el síntoma?' },
+			{ role: 'user', content: 'perdida de liquido amortiguadores' },
+			{ role: 'assistant', content: '¿Kilometraje?' },
+		];
+		await handleChat(makeRequest({ message: '130.000 km', history }), env);
+
+		const embedCall = fetchMock.mock.calls.find(([url]) => url.includes(':embedContent'));
+		const consulta = JSON.parse(embedCall[1].body).content.parts[0].text;
+
+		expect(consulta).toContain('hilux srx 2020');
+		expect(consulta).toContain('perdida de liquido amortiguadores');
+		expect(consulta).toContain('130.000 km');
+		// Las repreguntas del bot no son parte del caso y ensuciarían la búsqueda.
+		expect(consulta).not.toContain('¿Kilometraje?');
+	});
+
+	it('sin historial, la consulta de búsqueda es el mensaje tal cual', async () => {
+		const fetchMock = mockFetch();
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv();
+		await handleChat(makeRequest({ message: 'garantía de baterías', history: [] }), env);
+
+		const embedCall = fetchMock.mock.calls.find(([url]) => url.includes(':embedContent'));
+		expect(JSON.parse(embedCall[1].body).content.parts[0].text).toBe('garantía de baterías');
 	});
 });
