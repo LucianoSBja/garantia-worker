@@ -276,7 +276,15 @@ export default {
 
 		if (url.pathname === '/' || url.pathname === '/index.html') {
 			return new Response(chatHTML(), {
-				headers: { 'Content-Type': 'text/html; charset=utf-8', ...CORS_HEADERS },
+				headers: {
+					'Content-Type': 'text/html; charset=utf-8',
+					// La UI entera —HTML, CSS y JS— viaja en esta respuesta y cambia en
+					// cada deploy. Sin esta cabecera el navegador le aplica caché
+					// heurístico y sigue mostrando la versión anterior: un arreglo de
+					// estilo puede quedar invisible aunque el Worker ya esté actualizado.
+					'Cache-Control': 'no-cache',
+					...CORS_HEADERS,
+				},
 			});
 		}
 
@@ -993,6 +1001,21 @@ function chatHTML() {
       });
     }
 
+    // Contenedores cuyos hijos son bloques: el salto de línea que marked deja
+    // entre ellos es formato del HTML, nunca contenido. Se excluyen a propósito
+    // P, LI, SPAN y demás, donde un espacio suelto SÍ separa palabras — sacarlo
+    // pegaría "…cubre" con un <strong> que viene después.
+    const CONTENEDORES_DE_BLOQUES = new Set(['BODY', 'UL', 'OL', 'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR']);
+
+    function quitarEspaciosEstructurales(nodo) {
+      if (CONTENEDORES_DE_BLOQUES.has(nodo.tagName)) {
+        [...nodo.childNodes]
+          .filter((h) => h.nodeType === Node.TEXT_NODE && !h.textContent.trim())
+          .forEach((h) => h.remove());
+      }
+      [...nodo.children].forEach(quitarEspaciosEstructurales);
+    }
+
     function renderMarkdownSeguro(text) {
       const html = marked.parse(String(text || ''));
       // DOMParser no ejecuta scripts ni dispara handlers: el documento queda
@@ -1000,12 +1023,7 @@ function chatHTML() {
       const doc = new DOMParser().parseFromString(html, 'text/html');
       limpiarNodo(doc.body);
 
-      // Los saltos de línea que marked deja ENTRE bloques llegan como nodos de
-      // texto vacíos. Con white-space normal no molestan, pero se van igual para
-      // que la burbuja no dependa de eso.
-      [...doc.body.childNodes]
-        .filter((n) => n.nodeType === Node.TEXT_NODE && !n.textContent.trim())
-        .forEach((n) => n.remove());
+      quitarEspaciosEstructurales(doc.body);
 
       // La clase va DESPUÉS de limpiarNodo, que borra todos los atributos.
       const ultimo = doc.body.lastElementChild;
