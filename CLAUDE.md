@@ -65,9 +65,17 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 
 #### La búsqueda va sobre el caso acumulado, no sobre el último mensaje
 
-El `SYSTEM_PROMPT` obliga a pedir modelo, síntoma y kilometraje **de a uno**. Con eso, al tercer turno el último mensaje del usuario es algo como `130.000 km, entrega 15/01/2020`: embeberlo solo a él tira justo los datos que describen el caso. Medido, la diferencia es total — una consulta de ruido en la distribución recuperaba `Toyota 10 - T&C.pdf` a 0.70 con el último mensaje, y `ABI-515` a 0.78 con el caso acumulado.
+El `SYSTEM_PROMPT` pide modelo, síntoma y kilometraje **de a uno** cuando el técnico trae una falla. Con eso, al tercer turno el último mensaje del usuario es algo como `130.000 km, entrega 15/01/2020`: embeberlo solo a él tira justo los datos que describen el caso. Medido, la diferencia es total — una consulta de ruido en la distribución recuperaba `Toyota 10 - T&C.pdf` a 0.70 con el último mensaje, y `ABI-515` a 0.78 con el caso acumulado.
 
 El corte en tres turnos es para no arrastrar una consulta anterior ya cerrada. Solo entran los mensajes del usuario: las repreguntas del bot son ruido.
+
+#### Dos tipos de consulta, y solo una repregunta
+
+El `SYSTEM_PROMPT` separa explícitamente el caso de un vehículo con una falla —donde hace falta modelo + síntoma + kilometraje y se pregunta de a uno— de la consulta general: qué cubre o excluye un programa, qué plazos rigen, qué dice un boletín.
+
+La separación existe porque la regla original era incondicional y hacía inservible cualquier pregunta de política. `decime todo lo que entra en Toyota 10` pedía el modelo, después el síntoma —que no existe, no hay ninguna falla— y después el kilometraje, sin llegar nunca a responder. La búsqueda, mientras tanto, ya traía 9 fragmentos correctos de `Toyota 10 - T&C.pdf` con scores de 0.74 a 0.81: lo único que faltaba era permitirle contestar.
+
+El recordatorio por turno que arma `handleChat` repite la distinción; si se lo deja incondicional, pisa al `SYSTEM_PROMPT` y vuelve el interrogatorio.
 
 #### Búsqueda doble: consulta cruda + consulta reescrita
 
