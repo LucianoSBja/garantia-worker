@@ -425,6 +425,18 @@ describe('handleChat', () => {
 		expect(contents[0].parts[0].text).toBe('hilux srx 2020. pierde líquido');
 	});
 
+	// Sin versión en la clave, un deploy que cambia el prompt sigue sirviendo por
+	// una hora las respuestas de la lógica anterior y parece no haber surtido efecto.
+	it('la clave de caché lleva la versión de la lógica de respuesta', async () => {
+		vi.stubGlobal('fetch', mockFetch());
+		const env = makeEnv({ cachedReply: null });
+		await handleChat(makeRequest({ message: 'Qué Cubre Toyota 10', history: [] }), env);
+
+		const [clave] = env.garantia_cache.put.mock.calls[0];
+		expect(clave).toMatch(/^chat:v\d+:qué cubre toyota 10$/);
+		expect(lecturasDeCacheDeChat(env)[0][0]).toBe(clave);
+	});
+
 	it('sin historial, la consulta de búsqueda es el mensaje tal cual', async () => {
 		const fetchMock = mockFetch();
 		vi.stubGlobal('fetch', fetchMock);

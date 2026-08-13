@@ -28,6 +28,16 @@ Ante la duda, si el técnico no mencionó ninguna falla concreta, es del tipo 2.
 // Mapa nombre de archivo -> URL de Drive, que publica src/drive_upload.js.
 const KV_KEY_DOCS = 'docs:urls';
 
+// Versión de la lógica de respuesta, que va en la clave del caché.
+//
+// SUBIRLA al tocar el SYSTEM_PROMPT, el prompt de reformulación o el pipeline de
+// búsqueda. Sin esto, las respuestas generadas con la lógica anterior se siguen
+// sirviendo hasta que vence el TTL de una hora, y el deploy parece no haber
+// tenido efecto: pasó con "decime todo lo que entra en toyota 10", que después
+// de arreglar la repregunta seguía devolviendo el pedido de modelo cacheado.
+// Las claves viejas no se borran, vencen solas.
+const VERSION_CACHE = 2;
+
 // Convierte en link cada nombre de archivo que el modelo haya citado. Se hace en
 // una sola pasada con una alternativa por documento: reemplazar de a uno haría
 // que un nombre corto matcheara adentro del markdown recién insertado por otro
@@ -272,7 +282,7 @@ export async function handleChat(request, env) {
 		}
 
 		// 1. Revisar caché KV
-		const cacheKey = `chat:${message.trim().toLowerCase().slice(0, 100)}`;
+		const cacheKey = `chat:v${VERSION_CACHE}:${message.trim().toLowerCase().slice(0, 100)}`;
 
 		if (isFirstMessage) {
 			const cached = await env.garantia_cache.get(cacheKey);

@@ -54,7 +54,7 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 
 ### Flujo de `handleChat`
 
-1. Cache KV — **solo si `history.length === 0`**. Key: `chat:${message.toLowerCase().slice(0,100)}`, TTL 1h.
+1. Cache KV — **solo si `history.length === 0`**. Key: `chat:v${VERSION_CACHE}:${message.toLowerCase().slice(0,100)}`, TTL 1h.
 2. `construirConsulta()` arma el texto a buscar con los últimos `TURNOS_DE_CONTEXTO` (3) mensajes del usuario más el actual. Se busca dos veces: con ese texto y con el que devuelve `reformularConsulta()`, ambos embebidos con `taskType: 'RETRIEVAL_QUERY'`.
 3. `VECTORIZE.query(embedding, { topK: 5, returnMetadata: 'all' })` por cada consulta.
 4. Filtro por `score > UMBRAL_RELEVANCIA`.
@@ -68,6 +68,12 @@ Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 40
 El `SYSTEM_PROMPT` pide modelo, síntoma y kilometraje **de a uno** cuando el técnico trae una falla. Con eso, al tercer turno el último mensaje del usuario es algo como `130.000 km, entrega 15/01/2020`: embeberlo solo a él tira justo los datos que describen el caso. Medido, la diferencia es total — una consulta de ruido en la distribución recuperaba `Toyota 10 - T&C.pdf` a 0.70 con el último mensaje, y `ABI-515` a 0.78 con el caso acumulado.
 
 El corte en tres turnos es para no arrastrar una consulta anterior ya cerrada. Solo entran los mensajes del usuario: las repreguntas del bot son ruido.
+
+#### El caché lleva versión, y hay que subirla
+
+`VERSION_CACHE` va adentro de la clave. **Subirla al tocar el `SYSTEM_PROMPT`, el prompt de reformulación o el pipeline de búsqueda.**
+
+Sin eso, un deploy que cambia el comportamiento no invalida nada: las respuestas generadas con la lógica anterior se siguen sirviendo hasta que vence el TTL de una hora, y parece que el deploy no funcionó. Pasó exactamente así con `decime todo lo que entra en toyota 10` — ya arreglada la repregunta, seguía devolviendo el pedido de modelo desde el caché, con `cached: true`. Las claves viejas no se borran, vencen solas.
 
 #### Dos tipos de consulta, y solo una repregunta
 
