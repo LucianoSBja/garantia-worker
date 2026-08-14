@@ -17,6 +17,10 @@ Distinguí dos tipos de consulta:
 
 Ante la duda, si el técnico no mencionó ninguna falla concreta, es del tipo 2.
 
+Mencionar un modelo junto a una pieza puntual NO es una falla por sí solo: solo es tipo 1 si el
+técnico describe además una anomalía (algo roto, que no anda, un síntoma). "La traba del capot,
+¿entra en Toyota10 para la Corolla?" no tiene falla — es tipo 2, aunque nombre modelo y pieza.
+
 ## Al responder
 - Usá solo la información del contexto provisto
 - No inventes coberturas ni procedimientos
@@ -37,7 +41,7 @@ const KV_KEY_DOCS = 'docs:urls';
 // tenido efecto: pasó con "decime todo lo que entra en toyota 10", que después
 // de arreglar la repregunta seguía devolviendo el pedido de modelo cacheado.
 // Las claves viejas no se borran, vencen solas.
-const VERSION_CACHE = 3;
+const VERSION_CACHE = 4;
 
 // Convierte en link cada nombre de archivo que el modelo haya citado. Se hace en
 // una sola pasada con una alternativa por documento: reemplazar de a uno haría

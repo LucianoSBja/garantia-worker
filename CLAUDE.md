@@ -83,6 +83,8 @@ La separación existe porque la regla original era incondicional y hacía inserv
 
 El recordatorio por turno que arma `handleChat` repite la distinción; si se lo deja incondicional, pisa al `SYSTEM_PROMPT` y vuelve el interrogatorio.
 
+Nombrar un modelo junto a una pieza puntual no alcanza para que el modelo lo tome como tipo 1: medido contra `¿La cerradura del portón trasero de la Hilux entra en Toyota 10?` (un caso de prueba real del cliente), la regla sin esta aclaración pedía kilometraje 3 de 4 veces pese a la salvedad de "ante la duda". El dato ya estaba en `Toyota10_Garantia_por_Modelo.docx`; lo único que fallaba era la clasificación. Se agregó una aclaración explícita con un ejemplo ajeno al caso real (traba del capot / Corolla, no cerradura / Hilux) para no repetir el error de la reescritura de sobreajustarse a un ejemplo literal — verificado 5/5 sobre la frase reportada, sin regresión en los dos casos generales anteriores.
+
 #### Búsqueda doble: consulta cruda + consulta reescrita
 
 Cada turno hace **dos** búsquedas y une los resultados. Antes de buscar, `reformularConsulta()` le pide a Gemini que reescriba el caso al vocabulario de los documentos, y se busca con las dos redacciones.
@@ -108,6 +110,8 @@ Medido contra el índice real con consultas acumuladas: las que tienen respuesta
 `UMBRAL_RELEVANCIA = 0.72` va apenas debajo del acierto más flojo a propósito: un falso positivo lo descarta el modelo, que igual tiene que decidir si el contexto responde; un falso negativo pierde en silencio un documento útil. **No subirlo "para filtrar mejor"** sin volver a medir: el número anterior (0.55) estaba tan abajo que la rama sin contexto no se ejecutaba nunca.
 
 Concatenar sube todos los scores, así que el umbral está atado a `construirConsulta`. Si cambia cuántos turnos se arrastran, hay que remedir.
+
+**Pendiente, medido pero no resuelto:** `Toyota10_Garantia_por_Modelo.docx` repite casi el mismo párrafo de "Confort y equipamiento" para cada uno de los 7 modelos, con `cerraduras` como una pieza más en una lista larga (limpiaparabrisas, techo solar, asientos, ópticas...). Para una consulta puntual sobre esa pieza (`¿la cerradura del portón trasero de la Hilux entra en Toyota 10?`), tanto la búsqueda cruda (0.67) como buena parte de las reformulaciones (0.71–0.74) quedan pegadas al umbral, en la misma zona gris de arriba. Medido en producción tras el fix de clasificación de más abajo: 2 de 5 corridas frescas caen en "no encontré datos" pese a que el dato está en el corpus. No es un problema de umbral — subirlo o bajarlo no lo arregla, porque el score está diluido por el chunk, no por el corte. Antes de tocarlo habría que rehacer el chunking de ese documento puntual (por ejemplo, un chunk por categoría de cobertura en vez de por bloque de 400 palabras) y remedir con varios componentes, no solo con este caso.
 
 #### Las citas se validan contra el contexto
 
