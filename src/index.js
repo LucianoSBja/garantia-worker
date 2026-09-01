@@ -243,7 +243,77 @@ async function fetchConReintento(url, opciones) {
 	return res;
 }
 
+// Limita la tasa de llamadas salientes a Gemini para no generar el 429 en
+// primer lugar, en vez de solo reintentar después. Balde de tokens en
+// memoria, sin `state.storage` a propósito: si la instancia se descarta por
+// inactividad es señal de que no hay carga, y que el balde reaparezca lleno
+// es el comportamiento correcto.
+//
+// Un balde separado por tipo de llamada (embed / generate) porque Google las
+// cuota por separado — el propio error trae "requests_per_minute_per_base_model"
+// nombrando el modelo — así que frenar embeddings por culpa de generaciones,
+// o viceversa, sería más conservador de lo necesario.
+//
+// La cuota real de Google no está publicada y varía por proyecto — no se
+// adivinó. Calibrado contra este proyecto con la cuota ya recuperada: 25
+// pedidos seguidos y hasta 30 simultáneos entraron sin ningún 429, así que el
+// límite real parece ser de volumen acumulado en una ventana, no de
+// concurrencia pura, y se dispara con uso pesado sostenido (varias tandas de
+// prueba seguidas), no con el uso real de unos pocos técnicos. Por eso estos
+// números van deliberadamente holgados: es contención ante una ráfaga
+// patológica, no un freno de mano al uso normal. `fetchConReintento` sigue
+// siendo el respaldo si la cuota real resulta más ajustada de lo medido.
+const CUPO_GEMINI = {
+	embed: { capacidad: 10, porMinuto: 30 },
+	generate: { capacidad: 10, porMinuto: 30 },
+};
+
+export class GeminiRateLimiter {
+	constructor() {
+		const ahora = Date.now();
+		this.baldes = {
+			embed: { tokens: CUPO_GEMINI.embed.capacidad, ultimo: ahora },
+			generate: { tokens: CUPO_GEMINI.generate.capacidad, ultimo: ahora },
+		};
+	}
+
+	async fetch(request) {
+		const { tipo } = await request.json();
+		const cfg = CUPO_GEMINI[tipo];
+		const balde = this.baldes[tipo];
+		if (!cfg || !balde) {
+			return Response.json({ error: 'tipo de cupo inválido' }, { status: 400 });
+		}
+
+		const tasaPorMs = cfg.porMinuto / 60000;
+		const ahora = Date.now();
+		const transcurrido = ahora - balde.ultimo;
+		balde.tokens = Math.min(cfg.capacidad, balde.tokens + transcurrido * tasaPorMs);
+		balde.ultimo = ahora;
+
+		balde.tokens -= 1;
+		const esperaMs = balde.tokens < 0 ? Math.ceil(-balde.tokens / tasaPorMs) : 0;
+		if (esperaMs > 0) await new Promise((r) => setTimeout(r, esperaMs));
+
+		return Response.json({ esperaMs });
+	}
+}
+
+// Si el binding no existe (tests, algún entorno sin el Durable Object) sigue
+// sin esperar — el limitador es una mejora, no un requisito, igual que
+// reformularConsulta. Una falla acá tampoco debe bloquear el turno.
+async function esperarCupoGemini(env, tipo) {
+	if (!env.GEMINI_LIMITER) return;
+	try {
+		const stub = env.GEMINI_LIMITER.get(env.GEMINI_LIMITER.idFromName('global'));
+		await stub.fetch('https://limiter/acquire', { method: 'POST', body: JSON.stringify({ tipo }) });
+	} catch (err) {
+		console.error('No se pudo consultar el rate limiter de Gemini, sigue sin esperar:', err);
+	}
+}
+
 async function embedText(env, text, taskType) {
+	await esperarCupoGemini(env, 'embed');
 	const res = await fetchConReintento(`${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`, {
 		method: 'POST',
 		headers: {
@@ -268,6 +338,7 @@ function toGeminiRole(role) {
 }
 
 async function generateReply(env, systemPrompt, history, userPrompt) {
+	await esperarCupoGemini(env, 'generate');
 	const contents = [
 		...history.map((m) => ({ role: toGeminiRole(m.role), parts: [{ text: m.content }] })),
 		{ role: 'user', parts: [{ text: userPrompt }] },

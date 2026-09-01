@@ -21,5 +21,19 @@
 			"binding": "garantia_cache",
 			"id": "d1f39512c3204c818120f62cff06e8d4"
 		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "GEMINI_LIMITER",
+				"class_name": "GeminiRateLimiter"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["GeminiRateLimiter"]
+		}
 	]
 }
