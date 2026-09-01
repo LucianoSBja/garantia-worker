@@ -483,4 +483,31 @@ describe('handleChat', () => {
 		const body = await res.json();
 		expect(body.reply).toBeDefined();
 	});
+
+	// Antes se cacheaba igual que una respuesta real: un 429 agotando los
+	// reintentos quedaba pegado hasta una hora para cualquiera que preguntara
+	// lo mismo, aunque la cuota ya se hubiera recuperado en el siguiente intento.
+	it('si Gemini no devuelve respuesta final, avisa que hay mucha demanda y no lo cachea', async () => {
+		let generaciones = 0;
+		const fetchMock = vi.fn(async (url) => {
+			if (url.includes(':embedContent')) {
+				return { status: 200, ok: true, json: async () => ({ embedding: { values: new Array(768).fill(0.01) } }) };
+			}
+			generaciones++;
+			if (generaciones === 1) {
+				// reformulación: responde normal
+				return { status: 200, ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'consulta reescrita' }] } }] }) };
+			}
+			// respuesta final: sin candidates, como cuando se agotan los reintentos
+			return { status: 200, ok: true, json: async () => ({}) };
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({ matches: [{ score: 0.8, metadata: { source: 'doc.pdf', text: 'contenido' } }] });
+
+		const res = await handleChat(makeRequest({ message: 'garantía de baterías', history: [] }), env);
+		const body = await res.json();
+
+		expect(body.reply).toBe('Hay mucha demanda en este momento. Esperá unos segundos e intentá de nuevo.');
+		expect(env.garantia_cache.put).not.toHaveBeenCalled();
+	});
 });

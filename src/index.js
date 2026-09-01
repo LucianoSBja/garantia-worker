@@ -470,13 +470,22 @@ export async function handleChat(request, env) {
 
 		// 5. Llamar a Gemini y descartar las citas que no correspondan a un
 		// documento realmente entregado en este turno.
-		const generado = (await generateReply(env, SYSTEM_PROMPT, history, userPrompt)) || 'No pude generar una respuesta. Intentá de nuevo.';
+		//
+		// Si Gemini no devolvió nada (agotó los reintentos ante 429, por ejemplo)
+		// generado queda undefined. El mensaje avisa que es tráfico/cuota, no un
+		// error de la consulta, y no inventa un tiempo de espera preciso: Google
+		// no publica cuánto tarda en recuperarse la cuota.
+		const generado = await generateReply(env, SYSTEM_PROMPT, history, userPrompt);
 		const permitidos = new Set([...matches.map((m) => m.metadata?.source).filter(Boolean), ...cercanos]);
-		const reply = validarCitas(generado, permitidos);
+		const reply = validarCitas(generado || 'Hay mucha demanda en este momento. Esperá unos segundos e intentá de nuevo.', permitidos);
 
 		// 6. Guardar en caché por 1 hora — sin los links, así una republicación del
 		// mapa de Drive se refleja en las respuestas ya cacheadas.
-		if (isFirstMessage) {
+		//
+		// Solo si generado existe: cachear el aviso de "mucha demanda" pegaría esa
+		// respuesta a cualquiera que pregunte lo mismo hasta que venza el TTL, aunque
+		// la cuota ya se haya recuperado en el segundo intento.
+		if (isFirstMessage && generado) {
 			await env.garantia_cache.put(cacheKey, reply, { expirationTtl: 3600 });
 		}
 
