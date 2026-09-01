@@ -618,7 +618,9 @@ function chatHTML() {
       letter-spacing: .03em; text-transform: uppercase;
     }
     /* Siempre visible -incluso en pantallas chicas y en medio de una
-       consulta- porque vive en el header, que no se oculta entre home y chat. */
+       consulta- porque vive en el header, que no se oculta entre home y chat.
+       El texto solo entra a partir de tablet (ver breakpoints más abajo):
+       en mobile no hay lugar y queda solo el ícono. */
     .header-icon-btn {
       flex-shrink: 0;
       background: rgba(255,255,255,0.15);
@@ -627,11 +629,16 @@ function chatHTML() {
       width: 32px; height: 32px;
       font-size: 1rem; line-height: 1;
       cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
       -webkit-tap-highlight-color: transparent;
       transition: background .15s;
     }
     .header-icon-btn:hover, .header-icon-btn:active { background: rgba(255,255,255,0.3); }
+    .header-icon-text {
+      display: none;
+      color: #fff; font-size: .78rem; font-weight: 600;
+      white-space: nowrap;
+    }
 
     /* ── Status bar ── */
     .status-bar {
@@ -866,6 +873,13 @@ function chatHTML() {
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
+    /* Pantalla grande (tablet en adelante): entra el texto del botón de la
+       Política junto al ícono. En mobile no hay lugar, queda solo el ícono. */
+    @media (min-width: 600px) {
+      .header-icon-btn { width: auto; padding: 0 12px; }
+      .header-icon-text { display: inline; }
+    }
+
     /* Landscape móvil con altura reducida */
     @media (max-height: 500px) and (orientation: landscape) {
       .welcome-block p { display: none; }
@@ -1037,7 +1051,8 @@ function chatHTML() {
         <p>Asistente de garantías · Sáenz Peña</p>
       </div>
       <button class="header-icon-btn" onclick="abrirModalPolitica()" aria-label="Ver Política de Garantía y Mantenimiento" title="Política de Garantía">
-        📘
+        <span>📘</span>
+        <span class="header-icon-text">Política de Garantía</span>
       </button>
       <span class="header-badge">Toyota</span>
     </header>
