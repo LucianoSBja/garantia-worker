@@ -189,6 +189,92 @@ function chunkText(text, chunkSize = 400, overlap = 50) {
   return chunks;
 }
 
+// Chunker específico para Toyota10_Garantia_por_Modelo.docx. El genérico por
+// bloques de 400 palabras diluía "Carrocería" (donde vive "cerraduras") en un
+// chunk con contenido de otras secciones, y como el párrafo es casi idéntico
+// para los 7 modelos, una consulta puntual sobre una pieza quedaba en la zona
+// gris del umbral — medido: 2 de 5 corridas frescas caían en "no encontré
+// datos" pese a que el dato está en el corpus (ver CLAUDE.md). Acá el chunk
+// es una sección completa de un modelo, con el modelo como prefijo: así
+// "cerraduras" no compite por espacio con el resto de Carrocería, y el
+// prefijo distingue un modelo de otro aunque el contenido sea casi igual.
+//
+// Si la estructura no calza (cambió el documento, faltan modelos) devuelve
+// null y quien llama cae al chunking genérico — no hay que romper la ingesta
+// por esto.
+const MODELOS_TOYOTA10 = ["HILUX", "SW4", "COROLLA", "ETIOS", "YARIS", "YARIS CROSS", "COROLLA CROSS"];
+
+const SECCIONES_TOYOTA10 = [
+  "Garantía Inicial —",
+  "Alcance general",
+  "Garantía Adicional Toyota10 —",
+  "Motor",
+  "Sistema de combustible",
+  "Sistema de refrigeración",
+  "Transmisión + transferencia 4x4",
+  "Transmisión de potencia",
+  "Transmisión",
+  "Sistema de frenos",
+  "Sistema de suspensión",
+  "Ítems de seguridad",
+  "Aire acondicionado",
+  "Sistema de dirección",
+  "Sistema híbrido — Cobertura especial",
+  "Sistema híbrido",
+  "Sistema eléctrico",
+  "Carrocería",
+  "NO CUBRE —",
+  "Batería —",
+];
+
+// Un párrafo es encabezado de sección si empieza con uno de SECCIONES_TOYOTA10
+// Y es corto: el contenido real (listas de piezas) siempre es mucho más
+// largo, pero puede EMPEZAR con la misma palabra por casualidad — pasó con
+// "Sistema eléctrico" seguido de "Motor de arranque, alternador...", que
+// matcheaba "Motor" sin el tope de longitud.
+function seccionToyota10(parrafo) {
+  const candidato = SECCIONES_TOYOTA10.find((s) => parrafo.startsWith(s));
+  return candidato && parrafo.length <= candidato.length + 50 ? candidato : null;
+}
+
+function chunkGarantiaPorModelo(texto) {
+  const parrafos = texto
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const indicesModelo = parrafos.reduce((acc, p, i) => {
+    if (MODELOS_TOYOTA10.includes(p)) acc.push(i);
+    return acc;
+  }, []);
+
+  if (indicesModelo.length !== MODELOS_TOYOTA10.length) return null;
+
+  const chunks = [parrafos.slice(0, indicesModelo[0]).join("\n")];
+
+  for (let m = 0; m < indicesModelo.length; m++) {
+    const modelo = parrafos[indicesModelo[m]];
+    const fin    = m + 1 < indicesModelo.length ? indicesModelo[m + 1] : parrafos.length;
+    const bloque = parrafos.slice(indicesModelo[m] + 1, fin);
+
+    // Descripción del modelo + línea de motor/tracción, antes de la primera sección.
+    const indicePrimeraSeccion = bloque.findIndex((p) => seccionToyota10(p));
+    const intro = bloque.slice(0, indicePrimeraSeccion === -1 ? bloque.length : indicePrimeraSeccion);
+    if (intro.length) chunks.push(`[${modelo}]\n${intro.join("\n")}`);
+
+    let i = indicePrimeraSeccion;
+    while (i !== -1 && i < bloque.length) {
+      let j = i + 1;
+      while (j < bloque.length && !seccionToyota10(bloque[j])) j++;
+      const contenido = bloque.slice(i + 1, j).join(" ");
+      chunks.push(`[${modelo}] ${bloque[i]}\n${contenido}`);
+      i = j;
+    }
+  }
+
+  return chunks.filter((c) => c.trim().length > 50);
+}
+
 // ── Cloudflare AI embedding ───────────────────────────────────────────────────
 async function getEmbedding(text) {
   for (let intento = 0; intento <= REINTENTOS_MAX; intento++) {
@@ -282,7 +368,7 @@ async function main() {
     process.exit(0);
   }
 
-  const chunks = chunkText(text);
+  const chunks = fileName === "Toyota10_Garantia_por_Modelo.docx" ? chunkGarantiaPorModelo(text) || chunkText(text) : chunkText(text);
   console.log(`🔪 Fragmentos: ${chunks.length}`);
 
   const vectors = [];
