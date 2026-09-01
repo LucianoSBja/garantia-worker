@@ -925,6 +925,75 @@ function chatHTML() {
     border-top: 1px solid var(--gray-border);
     margin: 8px 0;
     }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.5);
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px;
+      z-index: 100;
+    }
+    .modal-overlay[hidden] { display: none; }
+    .modal-box {
+      background: var(--white);
+      border-radius: var(--radius);
+      box-shadow: 0 10px 40px rgba(0,0,0,.25);
+      max-width: 640px; width: 100%;
+      max-height: min(80vh, 720px);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--gray-border);
+      flex-shrink: 0;
+    }
+    .modal-header h2 { font-size: .95rem; color: var(--black); }
+    .modal-close {
+      background: none; border: none; cursor: pointer;
+      font-size: 1rem; color: var(--gray-text);
+      width: 32px; height: 32px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .modal-close:hover { background: var(--gray-bg); color: var(--black); }
+    .modal-body {
+      padding: 16px; overflow-y: auto;
+      font-size: .82rem; line-height: 1.55; color: var(--black);
+    }
+    .modal-body h3 {
+      font-size: .85rem; font-weight: 700; color: var(--red);
+      margin: 18px 0 8px;
+    }
+    .modal-body h3:first-child { margin-top: 0; }
+    .modal-body p { margin: 0 0 10px; }
+    .modal-body ul { margin: 0 0 12px; padding-left: 20px; }
+    .modal-body li { margin-bottom: 6px; }
+    .modal-table {
+      width: 100%; border-collapse: collapse;
+      margin: 4px 0 12px;
+      font-size: .76rem;
+    }
+    .modal-table th, .modal-table td {
+      border: 1px solid var(--gray-border);
+      padding: 6px 8px; text-align: left;
+    }
+    .modal-table th { background: var(--gray-bg); font-weight: 700; }
+    .modal-note {
+      font-size: .76rem; color: var(--gray-text);
+      background: var(--gray-bg);
+      border-radius: 8px; padding: 8px 10px;
+      margin: 0 0 12px;
+    }
+    .modal-footnote {
+      font-size: .72rem; color: var(--gray-text);
+      border-top: 1px solid var(--gray-border);
+      padding-top: 10px; margin-top: 6px;
+    }
   </style>
 </head>
 <body>
@@ -1014,6 +1083,11 @@ function chatHTML() {
             <span class="card-label">ABI-513</span>
             <span class="card-sub">Sistema de inyección</span>
           </button>
+          <button class="card-btn" onclick="abrirModalPolitica()">
+            <span class="card-icon">📘</span>
+            <span class="card-label">Política de Garantía</span>
+            <span class="card-sub">Ver documento</span>
+          </button>
         </div>
         <div class="cards-grid role-grid">
         </div>
@@ -1039,6 +1113,60 @@ function chatHTML() {
       </div>
       <p class="footer-note">GarantIA responde con documentos oficiales. Verificá siempre con el responsable ante dudas.</p>
     </footer>
+
+    <!-- Modal: Política de Garantía y Mantenimiento -->
+    <!-- Contenido estático, transcripto del PDF a mano: no pasa por
+         renderMarkdownSeguro() porque no viene del modelo, así que no hace
+         falta sanitizarlo — es HTML que escribimos nosotros, no una respuesta
+         de Gemini. -->
+    <div class="modal-overlay" id="modalPolitica" hidden onclick="if (event.target === this) cerrarModalPolitica()">
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalPoliticaTitulo">
+        <div class="modal-header">
+          <h2 id="modalPoliticaTitulo">Política de Garantía y Mantenimiento</h2>
+          <button class="modal-close" onclick="cerrarModalPolitica()" aria-label="Cerrar">✕</button>
+        </div>
+        <div class="modal-body">
+          <h3>1. Responsabilidad del propietario</h3>
+          <p><strong>Obtención del Servicio de Garantía.</strong> El propietario tiene la responsabilidad de acercar su vehículo a cualquier Concesionario Toyota autorizado en el país para obtener el servicio de garantía.</p>
+          <p><strong>Mantenimiento y Cuidados.</strong> El propietario es el responsable de la operación correcta, mantenimiento y cuidados de su vehículo Toyota de acuerdo con las instrucciones contenidas en los Manuales del Propietario y Mantenimiento. Si el vehículo está sujeto a uso bajo condiciones severas, debe seguir las especificaciones particulares del Manual de Mantenimiento.</p>
+          <p><strong>Registro de Mantenimiento.</strong> Se sugiere conservar los registros de mantenimiento por si es necesario mostrarlos en situaciones que requieran comprobar que este se ha cumplido adecuadamente.</p>
+          <p><strong>Servicio de Mantenimiento Periódico.</strong> La realización de todos los Servicios de Mantenimiento Periódico que figuran al final del Manual de Garantía, efectuados en los Concesionarios Oficiales Toyota durante el período de Garantía, es requisito indispensable para que el vehículo se mantenga cubierto por la misma (completar los cupones por triplicado).</p>
+
+          <h3>2. Exclusiones de garantía (lo que no cubre)</h3>
+          <ul>
+            <li><strong>Factores fuera de control:</strong> reparaciones y ajustes por mal uso (motor a toda velocidad, sobrecarga), negligencia, modificación, alteración, manipulación indebida, accidentes o uso en competencias.</li>
+            <li><strong>Corrosión superficial y pintura</strong> debido a piedras de grava o rayaduras en la pintura.</li>
+            <li><strong>Daños ambientales:</strong> lluvia ácida, sustancias suspendidas en el aire, sal, granizo, tornados, rayos, inundaciones u otros actos de la naturaleza.</li>
+            <li><strong>Ruido normal y desgaste:</strong> ruido normal, vibraciones, desgaste o deterioro natural (decoloración, desvanecimiento, deformación o manchas).</li>
+            <li><strong>Kilometraje alterado:</strong> cualquier falla o evidencia de alteración del kilometraje implica la anulación inmediata de la garantía.</li>
+            <li><strong>Gastos adicionales:</strong> llamadas telefónicas, transporte, pérdida de tiempo, inconveniencias o pérdidas comerciales.</li>
+            <li><strong>Insumos incorrectos:</strong> falta de mantenimiento o uso de combustible, aceite o lubricantes no especificados en el Manual del Propietario.</li>
+            <li><strong>Mantenimiento de rutina:</strong> ajuste de motor, lubricación, limpieza, reemplazo de filtros, refrigerantes, bujías, fusibles, escobillas, pastillas de freno, disco de embrague, alineación y balanceo.</li>
+          </ul>
+
+          <h3>3. Restricciones especiales y accesorios no genuinos</h3>
+          <p><strong>Vibración al frenar — reemplazo de discos.</strong> Cualquier accesorio no genuino (por ejemplo, separadores/espaciadores de rueda) en contacto con los discos de freno anula la garantía por vibración al frenar:</p>
+          <ul>
+            <li>Genera diferencia de tamaño y mal asentamiento.</li>
+            <li>Repercute negativamente en la performance de frenado.</li>
+            <li>Provoca desgaste desparejo en las pastillas de freno.</li>
+          </ul>
+
+          <h3>4. Criterio de trabajo: exceso de kilometraje en servicios</h3>
+          <p>Ante el ingreso de una unidad cuyo kilometraje se haya excedido significativamente conforme al último servicio realizado, se aplica el siguiente criterio oficial de unificación:</p>
+          <table class="modal-table">
+            <thead><tr><th>Caso / Situación</th><th>Servicio correspondiente</th><th>Observación</th></tr></thead>
+            <tbody>
+              <tr><td>Último servicio a los 10.000&nbsp;km, ingresa con 28.000&nbsp;km</td><td>Servicio de 20.000&nbsp;km</td><td>Se realiza a los 28.000&nbsp;km actuales</td></tr>
+              <tr><td>Siguiente mantenimiento (≈40.000&nbsp;km)</td><td>Servicio de 40.000&nbsp;km</td><td>Según el kilometraje que tenga en ese momento</td></tr>
+            </tbody>
+          </table>
+          <p class="modal-note">Efecto sobre el plan: se saltea el Servicio de 30.000&nbsp;km para reordenar el plan de mantenimiento de la unidad.</p>
+
+          <p class="modal-footnote">Este documento resume la política oficial de garantía, mantenimiento y criterios operativos de taller.</p>
+        </div>
+      </div>
+    </div>
 
   </div><!-- /app -->
 
@@ -1235,6 +1363,15 @@ function chatHTML() {
       autoResize(input);
       sendMessage();
     }
+
+    /* Modal de la Política de Garantía: no dispara ninguna consulta, solo
+       muestra el documento — por eso no pasa por sendCard/sendMessage. */
+    const modalPolitica = document.getElementById('modalPolitica');
+    function abrirModalPolitica() { modalPolitica.hidden = false; }
+    function cerrarModalPolitica() { modalPolitica.hidden = true; }
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modalPolitica.hidden) cerrarModalPolitica();
+    });
 
     async function sendMessage() {
       const msg = input.value.trim();
