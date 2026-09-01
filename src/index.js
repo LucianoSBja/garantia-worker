@@ -1048,15 +1048,10 @@ function chatHTML() {
             <span class="card-label">Garantía batería</span>
             <span class="card-sub">Coberturas y plazos</span>
           </button>
-          <button class="card-btn" onclick="sendCard('Información sobre ABI-511.')">
-            <span class="card-icon">📋</span>
-            <span class="card-label">ABI-511</span>
-            <span class="card-sub">Boletín técnico</span>
-          </button>
-          <button class="card-btn" onclick="sendCard('Diagnóstico y resolución de reclamos por vibración al frenar en Hilux y SW4.')">
+          <button class="card-btn" onclick="sendCard('¿Qué dice el ABI-511 sobre el diagnóstico y resolución de reclamos por vibración al frenar en Hilux y SW4?')">
             <span class="card-icon">🔩</span>
             <span class="card-label">Vibración al frenar</span>
-            <span class="card-sub">Hilux / SW4</span>
+            <span class="card-sub">ABI-511 · Hilux / SW4</span>
           </button>
           <button class="card-btn" onclick="sendCard('ABI-515 Ruido en Distribución Motores GD - Hilux y SW4 MY2021-22-23-24-25.')">
             <span class="card-icon">🔊</span>
