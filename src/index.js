@@ -919,6 +919,21 @@ function chatHTML() {
             <span class="card-label">ABI-517</span>
             <span class="card-sub">Land Cruiser ECU</span>
           </button>
+          <button class="card-btn" onclick="sendCard('¿Qué situaciones o condiciones dejan un vehículo fuera de la garantía Toyota?')">
+            <span class="card-icon">📜</span>
+            <span class="card-label">Fuera de garantía</span>
+            <span class="card-sub">Exclusiones y T&amp;C</span>
+          </button>
+          <button class="card-btn" onclick="sendCard('¿Qué dice el ABI-505 sobre el tratamiento de reclamos de garantía del sistema DPF en Hilux y SW4?')">
+            <span class="card-icon">🌫️</span>
+            <span class="card-label">ABI-505</span>
+            <span class="card-sub">Sistema DPF</span>
+          </button>
+          <button class="card-btn" onclick="sendCard('¿Qué dice el ABI-513 sobre el procedimiento de diagnóstico y tratamiento de reclamos por el sistema de inyección en Hilux y SW4?')">
+            <span class="card-icon">⛽</span>
+            <span class="card-label">ABI-513</span>
+            <span class="card-sub">Sistema de inyección</span>
+          </button>
         </div>
         <div class="cards-grid role-grid">
         </div>
