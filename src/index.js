@@ -617,6 +617,21 @@ function chatHTML() {
       padding: 3px 8px; border-radius: 20px;
       letter-spacing: .03em; text-transform: uppercase;
     }
+    /* Siempre visible -incluso en pantallas chicas y en medio de una
+       consulta- porque vive en el header, que no se oculta entre home y chat. */
+    .header-icon-btn {
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 8px;
+      width: 32px; height: 32px;
+      font-size: 1rem; line-height: 1;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: background .15s;
+    }
+    .header-icon-btn:hover, .header-icon-btn:active { background: rgba(255,255,255,0.3); }
 
     /* ── Status bar ── */
     .status-bar {
@@ -668,10 +683,15 @@ function chatHTML() {
       color: var(--gray-text); padding: 4px 2px 2px;
     }
 
-    /* ── Cards de consultas frecuentes ── */
+    /* ── Cards de consultas frecuentes ──
+       flex + justify-content: center, no grid: así una fila incompleta (por
+       ejemplo 2 cards sueltas en una grilla de 3 columnas) queda centrada en
+       vez de pegada a la izquierda con un hueco vacío al lado. El ancho de
+       cada card lo da flex-basis en .card-btn por breakpoint, no acá. */
     .cards-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
       gap: 8px;
     }
     .card-btn {
@@ -683,6 +703,7 @@ function chatHTML() {
       transition: border-color .15s, background .15s, transform .1s;
       display: flex; flex-direction: column; gap: 6px;
       min-height: 72px;
+      flex: 0 1 calc(50% - 4px);
       -webkit-tap-highlight-color: transparent;
       touch-action: manipulation; user-select: none;
     }
@@ -820,20 +841,20 @@ function chatHTML() {
     @media (max-width: 359px) {
       .header-badge, .header-divider { display: none; }
       .header-info p { display: none; }
-      .cards-grid { grid-template-columns: 1fr; }
+      .card-btn { flex-basis: 100%; }
       .role-grid { grid-template-columns: 1fr; }
     }
 
     /* Mobile estándar 360–599px */
     @media (min-width: 360px) and (max-width: 599px) {
       .header-badge { display: none; }
-      .cards-grid { grid-template-columns: repeat(2, 1fr); }
+      .card-btn { flex-basis: calc(50% - 4px); }
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
     /* Tablet 600–859px */
     @media (min-width: 600px) and (max-width: 859px) {
-      .cards-grid { grid-template-columns: repeat(3, 1fr); }
+      .card-btn { flex-basis: calc((100% - 16px) / 3); }
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
@@ -841,7 +862,7 @@ function chatHTML() {
     @media (min-width: 860px) {
       body { background: var(--white); }
       .app { max-width: 100%; box-shadow: none; }
-      .cards-grid { grid-template-columns: repeat(4, 1fr); }
+      .card-btn { flex-basis: calc((100% - 24px) / 4); }
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
@@ -849,7 +870,7 @@ function chatHTML() {
     @media (max-height: 500px) and (orientation: landscape) {
       .welcome-block p { display: none; }
       .welcome-icon { width: 34px; height: 34px; font-size: 1rem; }
-      .cards-grid { grid-template-columns: repeat(4, 1fr); }
+      .card-btn { flex-basis: calc((100% - 24px) / 4); }
       .role-grid { grid-template-columns: repeat(2, 1fr); }
     }
 
@@ -1015,6 +1036,9 @@ function chatHTML() {
         <h1>GarantIA ⚡</h1>
         <p>Asistente de garantías · Sáenz Peña</p>
       </div>
+      <button class="header-icon-btn" onclick="abrirModalPolitica()" aria-label="Ver Política de Garantía y Mantenimiento" title="Política de Garantía">
+        📘
+      </button>
       <span class="header-badge">Toyota</span>
     </header>
 
@@ -1077,11 +1101,6 @@ function chatHTML() {
             <span class="card-icon">⛽</span>
             <span class="card-label">ABI-513</span>
             <span class="card-sub">Sistema de inyección</span>
-          </button>
-          <button class="card-btn" onclick="abrirModalPolitica()">
-            <span class="card-icon">📘</span>
-            <span class="card-label">Política de Garantía</span>
-            <span class="card-sub">Ver documento</span>
           </button>
         </div>
         <div class="cards-grid role-grid">
