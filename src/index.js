@@ -216,8 +216,35 @@ const GEMINI_CHAT_MODEL = 'gemini-3.5-flash-lite';
 // token generado y no por el tope, subirlo no cuesta nada si la respuesta es corta.
 const MAX_TOKENS_RESPUESTA = 1536;
 
+// La cuota de Gemini corta por minuto además de por día, y cada turno hace
+// hasta 4 llamadas (reformular, dos embeddings en paralelo, respuesta final).
+// Verificado en producción: una ráfaga de 10 consultas simultáneas —dos
+// técnicos usando el chat a la vez, o un solo usuario mandando varios mensajes
+// seguidos— tira 429 (RESOURCE_EXHAUSTED) en 6 de 10, y sin reintento eso
+// mataba el turno entero: "Error interno. Intentá de nuevo." Es la causa real
+// detrás de los reportes de "no responde".
+//
+// El reintento es corto a propósito porque hay un usuario esperando la
+// respuesta en pantalla, no la ejecución en lote de la ingesta. El jitter
+// evita que dos requests que pegaron 429 al mismo tiempo reintenten también
+// al mismo tiempo y se choquen de nuevo.
+const REINTENTOS_GEMINI = 3;
+const ESPERA_BASE_MS = 600;
+
+async function fetchConReintento(url, opciones) {
+	let res;
+	for (let intento = 0; intento < REINTENTOS_GEMINI; intento++) {
+		res = await fetch(url, opciones);
+		if (res.status !== 429) return res;
+		if (intento === REINTENTOS_GEMINI - 1) break;
+		const espera = ESPERA_BASE_MS * 2 ** intento + Math.random() * 300;
+		await new Promise((r) => setTimeout(r, espera));
+	}
+	return res;
+}
+
 async function embedText(env, text, taskType) {
-	const res = await fetch(`${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`, {
+	const res = await fetchConReintento(`${GEMINI_API_BASE}/${GEMINI_EMBED_MODEL}:embedContent`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -246,7 +273,7 @@ async function generateReply(env, systemPrompt, history, userPrompt) {
 		{ role: 'user', parts: [{ text: userPrompt }] },
 	];
 
-	const res = await fetch(`${GEMINI_API_BASE}/${GEMINI_CHAT_MODEL}:generateContent`, {
+	const res = await fetchConReintento(`${GEMINI_API_BASE}/${GEMINI_CHAT_MODEL}:generateContent`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',

@@ -457,4 +457,30 @@ describe('handleChat', () => {
 		const embedCall = fetchMock.mock.calls.find(([url]) => url.includes(':embedContent'));
 		expect(JSON.parse(embedCall[1].body).content.parts[0].text).toBe('garantía de baterías');
 	});
+
+	// Verificado en producción: bajo una ráfaga de consultas simultáneas, Gemini
+	// devuelve 429 (RESOURCE_EXHAUSTED) en la cuota por minuto y, sin reintento,
+	// eso tiraba el turno entero como "Error interno" — la causa real detrás de
+	// los reportes de "no responde".
+	it('reintenta ante un 429 transitorio de Gemini en vez de fallar el turno', async () => {
+		let embeddings = 0;
+		const fetchMock = vi.fn(async (url) => {
+			if (url.includes(':embedContent')) {
+				embeddings++;
+				if (embeddings === 1) {
+					return { status: 429, ok: false, json: async () => ({ error: { code: 429, status: 'RESOURCE_EXHAUSTED' } }) };
+				}
+				return { status: 200, ok: true, json: async () => ({ embedding: { values: new Array(768).fill(0.01) } }) };
+			}
+			return { status: 200, ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'Respuesta.' }] } }] }) };
+		});
+		vi.stubGlobal('fetch', fetchMock);
+		const env = makeEnv({ matches: [{ score: 0.8, metadata: { source: 'doc.pdf', text: 'contenido' } }] });
+
+		const res = await handleChat(makeRequest({ message: 'garantía de baterías', history: [] }), env);
+
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.reply).toBeDefined();
+	});
 });

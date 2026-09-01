@@ -141,9 +141,19 @@ Tres detalles fáciles de romper:
 
 Las 768 dimensiones están acopladas al índice `garantia-index-gemini` (declarado en `wrangler.jsonc` y hardcodeado como `INDEX_NAME` en ambos scripts de ingesta). Cambiar el modelo o las dimensiones obliga a crear un índice nuevo y re-indexar todo — Vectorize no permite cambiar dimensiones en caliente.
 
+#### La cuota de Gemini corta por minuto, no solo por día, y sin reintento eso rompía el chat
+
+Cada turno de `handleChat` hace hasta 4 llamadas a Gemini (reformular, dos embeddings en paralelo, respuesta final). La cuota gratuita tiene un tope por minuto además del diario de 1.000 embeddings — bastante bajo — y `embedText`/`generateReply` no tenían reintento: un único 429 (`RESOURCE_EXHAUSTED`) tiraba el turno entero al catch general de `handleChat` y devolvía `Error interno. Intentá de nuevo.`
+
+No era hipotético. Reportado por el cliente como "no responde ante consulta sobre vibración al frenar" y reproducido contra producción: una ráfaga de 8-10 consultas en paralelo (dos técnicos usando el chat a la vez alcanza) tiraba 429 en 6 a 8 de cada 10, confirmado con `wrangler tail` viendo el error real de Gemini.
+
+Fix: `fetchConReintento()` envuelve las dos llamadas con reintento corto (3 intentos, backoff con jitter) — corto a propósito porque hay un usuario esperando la respuesta, no es la ingesta en lote. Reduce el problema a nivel de ráfagas moderadas, verificado tras el deploy, pero **no lo resuelve del todo**: bajo carga sostenida por encima de la cuota por minuto (medido con 10 requests simultáneos autogenerados, un escenario más agresivo que el uso real del taller), una porción sigue agotando los 3 reintentos y cae en la respuesta de fallback ("No pude generar una respuesta"), que al menos no es un error 500. La solución de fondo es pedir un aumento de cuota en la consola de Google Cloud/AI Studio — eso lo tiene que hacer el cliente, no es un cambio de código.
+
 ### Ingesta
 
 Chunks de 400 palabras con overlap de 50, descartando los de <50 caracteres. Los IDs son determinísticos (`nombreArchivoSanitizado-índiceDeChunk`), así que re-ingestar el mismo archivo sobreescribe en lugar de duplicar. Contrapartida conocida: si un documento se achica, los vectores de los chunks sobrantes quedan huérfanos en el índice.
+
+**Un boletín reemplazado por uno nuevo no sale solo del índice — hay que borrarlo a mano.** Cuando un ABI nuevo sustituye a uno viejo (el propio texto del boletín nuevo suele decirlo: "el presente boletín sustituye..."), el viejo se queda en Vectorize indexado igual que cualquier otro documento y compite en el retrieval — a veces con score más alto, porque nada en el pipeline sabe que está obsoleto. Pasó dos veces: ABI-506 (discontinuado) y ABI-494 (reemplazado por ABI-511, que además revirtió una recomendación — pasó de permitir el reemplazo de discos de freno a restringirlo — así que el boletín viejo no solo competía en el ranking, lo hacía con información contradictoria). El fix es siempre el mismo: reconstruir los IDs determinísticos del archivo viejo (`get_by_ids` probando `sanitize(nombreConExtensión)-0`, `-1`, ... — el límite de la API es 20 ids por request) y `delete_by_ids`. No hay lookup por metadata: el índice no tiene un metadata index creado para `source`, así que `filter` en `query` devuelve 0 resultados aunque el documento exista.
 
 `ingest.js` anota cada archivo terminado en `.ingest-checkpoint.json` (gitignoreado), así que una corrida cortada retoma donde quedó. `ingest_file.js` no lo hace: procesa un solo archivo y no tendría sentido. Ante un `429` ambos reintentan con backoff exponencial (`REINTENTOS_MAX`, 5s → 80s) y esperan `PAUSA_MS` entre fragmentos para no pasarse de los 100 requests por minuto del free tier.
 
