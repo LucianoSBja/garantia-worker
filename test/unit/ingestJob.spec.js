@@ -49,16 +49,32 @@ function mockFetch({ embedding = new Array(768).fill(0.01), cuotaEnIntentos = []
 	});
 }
 
+// Vectorize falso con estado real (Map id->vector): permite precargar
+// "chunks ya indexados" para probar el backfill (contarChunksExistentes)
+// y confirmar que un delete realmente saca las ids del store.
+function makeVectorizeFalso() {
+	const store = new Map();
+	return {
+		_store: store,
+		upsert: vi.fn(async (vectores) => {
+			for (const v of vectores) store.set(v.id, v);
+			return { mutationId: 'm1' };
+		}),
+		deleteByIds: vi.fn(async (ids) => {
+			for (const id of ids) store.delete(id);
+			return { mutationId: 'm2' };
+		}),
+		getByIds: vi.fn(async (ids) => ids.filter((id) => store.has(id)).map((id) => store.get(id))),
+	};
+}
+
 function makeEnv() {
 	return {
 		GOOGLE_API_KEY: 'fake-gemini-key',
 		GOOGLE_OAUTH_CLIENT_ID: 'client-id',
 		GOOGLE_OAUTH_CLIENT_SECRET: 'client-secret',
 		GOOGLE_REFRESH_TOKEN: 'refresh-token',
-		VECTORIZE: {
-			upsert: vi.fn(async () => ({ mutationId: 'm1' })),
-			deleteByIds: vi.fn(async () => ({ mutationId: 'm2' })),
-		},
+		VECTORIZE: makeVectorizeFalso(),
 		garantia_cache: (() => {
 			const kv = new Map();
 			return {
@@ -121,6 +137,11 @@ describe('IngestJob', () => {
 		const estadoBody = await estado.json();
 		expect(estadoBody.estado).toBe('embedding');
 		expect(estadoBody.nextIndex).toBe(0);
+		// El panel arma un overlay optimista con esto mientras docs:index en KV
+		// no propagó todavía (ver admin_html.js) — sin driveFileId acá, el botón
+		// de preview quedaba deshabilitado justo después de subir.
+		expect(estadoBody.driveFileId).toBe('drive-file-id-1');
+		expect(estadoBody.driveUrl).toBeTruthy();
 	});
 
 	it('rechaza un segundo iniciar mientras hay un job embedding en curso', async () => {
@@ -242,5 +263,62 @@ describe('IngestJob', () => {
 		await job.alarm(); // un solo chunk -> termina y finaliza
 
 		expect(env.VECTORIZE.deleteByIds).toHaveBeenCalledWith(['ABI999pdf-1', 'ABI999pdf-2', 'ABI999pdf-3', 'ABI999pdf-4']);
+	});
+
+	it('docs:index refleja el ciclo de vida completo: pendiente -> indexado', async () => {
+		const { state, env } = makeStateYEnv();
+		const job = new IngestJob(state, env);
+
+		await job.iniciar(iniciarRequest({ text: 'contenido de prueba con más de cincuenta caracteres para pasar el filtro de chunking mínimo.' }));
+		let indice = JSON.parse(await env.garantia_cache.get('docs:index'));
+		expect(indice['ABI-999.pdf']).toMatchObject({ estado: 'pendiente', chunks: 1, indexadoEl: null });
+		expect(indice['ABI-999.pdf'].subidoEl).toBeTruthy();
+
+		await job.alarm();
+		indice = JSON.parse(await env.garantia_cache.get('docs:index'));
+		expect(indice['ABI-999.pdf']).toMatchObject({ estado: 'indexado' });
+		expect(indice['ABI-999.pdf'].indexadoEl).toBeTruthy();
+	});
+
+	it('si el job falla, docs:index queda en error con el mensaje', async () => {
+		vi.stubGlobal('fetch', mockFetch({ cuotaEnIntentos: [1, 2, 3, 4, 5, 6] }));
+		const { state, env } = makeStateYEnv();
+		const job = new IngestJob(state, env);
+		await job.iniciar(iniciarRequest());
+
+		for (let i = 0; i < 6; i++) await job.alarm();
+
+		const indice = JSON.parse(await env.garantia_cache.get('docs:index'));
+		expect(indice['ABI-999.pdf'].estado).toBe('error');
+		expect(indice['ABI-999.pdf'].error).toBeTruthy();
+	});
+
+	it('backfill: un archivo subido por la CLI (sin docs:index) se reemplaza actualizando el mismo Drive fileId', async () => {
+		const { state, env } = makeStateYEnv();
+
+		// Simula el estado de un documento del corpus original: está en
+		// docs:urls (lo subió drive_upload.js) y tiene 3 chunks reales en
+		// Vectorize, pero nunca pasó por el panel -> docs:index no lo conoce.
+		await env.garantia_cache.put('docs:urls', JSON.stringify({ 'ABI-999.pdf': 'https://drive.google.com/file/d/drive-file-id-1/view' }));
+		for (let i = 0; i < 3; i++) {
+			await env.VECTORIZE.upsert([{ id: `ABI999pdf-${i}`, values: [0], metadata: { source: 'ABI-999.pdf', text: 'x', chunk: i } }]);
+		}
+
+		const job = new IngestJob(state, env);
+		// Reemplazo con un solo chunk: debería detectar 3 chunks previos vía
+		// el probe (no vía docs:index, que está vacío) y borrar los 2 huérfanos.
+		await job.iniciar(iniciarRequest({ text: 'contenido nuevo y más corto, con más de cincuenta caracteres para el chunker.' }));
+		await job.alarm();
+
+		// La subida a Drive tiene que haber ido al MISMO fileId (PATCH, no un
+		// archivo nuevo) — se confirma indirectamente: el mock de fetch solo
+		// tiene una respuesta para uploadType=resumable, y si hubiera intentado
+		// crear uno nuevo sin fileIdExistente habría pedido la carpeta primero,
+		// lo cual también está mockeado, así que lo que realmente prueba el
+		// backfill es el borrado de huérfanos con el conteo correcto:
+		expect(env.VECTORIZE.deleteByIds).toHaveBeenCalledWith(['ABI999pdf-1', 'ABI999pdf-2']);
+
+		const indice = JSON.parse(await env.garantia_cache.get('docs:index'));
+		expect(indice['ABI-999.pdf']).toMatchObject({ estado: 'indexado', chunks: 1, driveFileId: 'drive-file-id-1' });
 	});
 });

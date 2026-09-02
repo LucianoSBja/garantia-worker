@@ -1,9 +1,10 @@
-import { manejarLogin, manejarLogout, requireAdminSession } from './admin_auth.js';
-import { leerIndice, eliminarDeIndice } from './docs_index.js';
+import { manejarLogin, manejarLogout, requireAdminSession, manejarForgotPassword, manejarResetPassword } from './admin_auth.js';
+import { leerIndice, eliminarDeIndice, eliminarDeMapaUrls } from './docs_index.js';
 import { borrarArchivo } from './drive_worker.js';
 import { sanitizarNombre } from './ingest_job_do.js';
 export { IngestJob } from './ingest_job_do.js';
 import { adminHTML } from './admin_html.js';
+import { leerPoliticaMarkdown, guardarPoliticaMarkdown } from './politica_modal.js';
 
 function ingestJobStub(env) {
 	return env.INGEST_JOB.get(env.INGEST_JOB.idFromName('current'));
@@ -33,13 +34,7 @@ export async function borrarDocumento(env, fileName) {
 	}
 
 	await eliminarDeIndice(env, fileName);
-
-	const crudo = await env.garantia_cache.get('docs:urls');
-	if (crudo) {
-		const urls = JSON.parse(crudo);
-		delete urls[fileName];
-		await env.garantia_cache.put('docs:urls', JSON.stringify(urls));
-	}
+	await eliminarDeMapaUrls(env, fileName);
 
 	return Response.json({ ok: true }, { headers: CORS_HEADERS });
 }
@@ -426,6 +421,14 @@ export default {
 			return manejarLogout(request, env);
 		}
 
+		if (url.pathname === '/admin/forgot-password' && request.method === 'POST') {
+			return manejarForgotPassword(request, env);
+		}
+
+		if (url.pathname === '/admin/reset-password' && request.method === 'POST') {
+			return manejarResetPassword(request, env);
+		}
+
 		if (url.pathname === '/admin') {
 			return new Response(adminHTML(), {
 				headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', ...CORS_HEADERS },
@@ -473,6 +476,24 @@ export default {
 
 			const fileName = decodeURIComponent(url.pathname.slice('/admin/api/files/'.length, -'/delete'.length));
 			return borrarDocumento(env, fileName);
+		}
+
+		if (url.pathname === '/admin/api/politica' && request.method === 'POST') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			const { markdown } = await request.json().catch(() => ({}));
+			if (typeof markdown !== 'string' || !markdown.trim()) {
+				return Response.json({ error: 'El texto no puede quedar vacío' }, { status: 400, headers: CORS_HEADERS });
+			}
+			await guardarPoliticaMarkdown(env, markdown);
+			return Response.json({ ok: true }, { headers: CORS_HEADERS });
+		}
+
+		// Pública a propósito: el mismo texto ya se le muestra a cualquier
+		// técnico que abra el modal 📘 del chat, no es información nueva.
+		if (url.pathname === '/politica' && request.method === 'GET') {
+			return Response.json({ markdown: await leerPoliticaMarkdown(env) }, { headers: CORS_HEADERS });
 		}
 
 		if (url.pathname === '/health') {
@@ -1103,35 +1124,36 @@ function chatHTML() {
       padding: 16px; overflow-y: auto;
       font-size: .82rem; line-height: 1.55; color: var(--black);
     }
-    .modal-body h3 {
+    .modal-body h2, .modal-body h3 {
       font-size: .85rem; font-weight: 700; color: var(--red);
       margin: 18px 0 8px;
     }
-    .modal-body h3:first-child { margin-top: 0; }
+    .modal-body h2:first-child, .modal-body h3:first-child { margin-top: 0; }
     .modal-body p { margin: 0 0 10px; }
-    .modal-body ul { margin: 0 0 12px; padding-left: 20px; }
+    .modal-body ul, .modal-body ol { margin: 0 0 12px; padding-left: 20px; }
     .modal-body li { margin-bottom: 6px; }
-    .modal-table {
+    /* El texto del modal viene de Markdown editado desde el panel (ver
+       politica_modal.js) y pasa por renderMarkdownSeguro(), que borra TODOS
+       los atributos — así que no llegan clases como .modal-table de acá. Se
+       apunta a las etiquetas dentro de .modal-body en vez de clases. */
+    .modal-body table {
       width: 100%; border-collapse: collapse;
       margin: 4px 0 12px;
       font-size: .76rem;
     }
-    .modal-table th, .modal-table td {
+    .modal-body th, .modal-body td {
       border: 1px solid var(--gray-border);
       padding: 6px 8px; text-align: left;
     }
-    .modal-table th { background: var(--gray-bg); font-weight: 700; }
-    .modal-note {
+    .modal-body th { background: var(--gray-bg); font-weight: 700; }
+    .modal-body blockquote {
       font-size: .76rem; color: var(--gray-text);
       background: var(--gray-bg);
       border-radius: 8px; padding: 8px 10px;
       margin: 0 0 12px;
     }
-    .modal-footnote {
-      font-size: .72rem; color: var(--gray-text);
-      border-top: 1px solid var(--gray-border);
-      padding-top: 10px; margin-top: 6px;
-    }
+    .modal-body hr { border: none; border-top: 1px solid var(--gray-border); margin: 10px 0; }
+    .modal-body hr + p { font-size: .72rem; color: var(--gray-text); margin-bottom: 0; }
   </style>
 </head>
 <body>
@@ -1247,56 +1269,18 @@ function chatHTML() {
     </footer>
 
     <!-- Modal: Política de Garantía y Mantenimiento -->
-    <!-- Contenido estático, transcripto del PDF a mano: no pasa por
-         renderMarkdownSeguro() porque no viene del modelo, así que no hace
-         falta sanitizarlo — es HTML que escribimos nosotros, no una respuesta
-         de Gemini. -->
+    <!-- El contenido se pide a GET /politica y se renderiza con
+         renderMarkdownSeguro() (mismo sanitizador que las respuestas del
+         chat) recién al abrir el modal — es texto editable desde el panel
+         admin, así que pasa por el mismo camino seguro que cualquier otro
+         texto que no escribimos nosotros a mano en este archivo. -->
     <div class="modal-overlay" id="modalPolitica" hidden onclick="if (event.target === this) cerrarModalPolitica()">
       <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalPoliticaTitulo">
         <div class="modal-header">
           <h2 id="modalPoliticaTitulo">Política de Garantía y Mantenimiento</h2>
           <button class="modal-close" onclick="cerrarModalPolitica()" aria-label="Cerrar">✕</button>
         </div>
-        <div class="modal-body">
-          <h3>1. Responsabilidad del propietario</h3>
-          <p><strong>Obtención del Servicio de Garantía.</strong> El propietario tiene la responsabilidad de acercar su vehículo a cualquier Concesionario Toyota autorizado en el país para obtener el servicio de garantía.</p>
-          <p><strong>Mantenimiento y Cuidados.</strong> El propietario es el responsable de la operación correcta, mantenimiento y cuidados de su vehículo Toyota de acuerdo con las instrucciones contenidas en los Manuales del Propietario y Mantenimiento. Si el vehículo está sujeto a uso bajo condiciones severas, debe seguir las especificaciones particulares del Manual de Mantenimiento.</p>
-          <p><strong>Registro de Mantenimiento.</strong> Se sugiere conservar los registros de mantenimiento por si es necesario mostrarlos en situaciones que requieran comprobar que este se ha cumplido adecuadamente.</p>
-          <p><strong>Servicio de Mantenimiento Periódico.</strong> La realización de todos los Servicios de Mantenimiento Periódico que figuran al final del Manual de Garantía, efectuados en los Concesionarios Oficiales Toyota durante el período de Garantía, es requisito indispensable para que el vehículo se mantenga cubierto por la misma (completar los cupones por triplicado).</p>
-
-          <h3>2. Exclusiones de garantía (lo que no cubre)</h3>
-          <ul>
-            <li><strong>Factores fuera de control:</strong> reparaciones y ajustes por mal uso (motor a toda velocidad, sobrecarga), negligencia, modificación, alteración, manipulación indebida, accidentes o uso en competencias.</li>
-            <li><strong>Corrosión superficial y pintura</strong> debido a piedras de grava o rayaduras en la pintura.</li>
-            <li><strong>Daños ambientales:</strong> lluvia ácida, sustancias suspendidas en el aire, sal, granizo, tornados, rayos, inundaciones u otros actos de la naturaleza.</li>
-            <li><strong>Ruido normal y desgaste:</strong> ruido normal, vibraciones, desgaste o deterioro natural (decoloración, desvanecimiento, deformación o manchas).</li>
-            <li><strong>Kilometraje alterado:</strong> cualquier falla o evidencia de alteración del kilometraje implica la anulación inmediata de la garantía.</li>
-            <li><strong>Gastos adicionales:</strong> llamadas telefónicas, transporte, pérdida de tiempo, inconveniencias o pérdidas comerciales.</li>
-            <li><strong>Insumos incorrectos:</strong> falta de mantenimiento o uso de combustible, aceite o lubricantes no especificados en el Manual del Propietario.</li>
-            <li><strong>Mantenimiento de rutina:</strong> ajuste de motor, lubricación, limpieza, reemplazo de filtros, refrigerantes, bujías, fusibles, escobillas, pastillas de freno, disco de embrague, alineación y balanceo.</li>
-          </ul>
-
-          <h3>3. Restricciones especiales y accesorios no genuinos</h3>
-          <p><strong>Vibración al frenar — reemplazo de discos.</strong> Cualquier accesorio no genuino (por ejemplo, separadores/espaciadores de rueda) en contacto con los discos de freno anula la garantía por vibración al frenar:</p>
-          <ul>
-            <li>Genera diferencia de tamaño y mal asentamiento.</li>
-            <li>Repercute negativamente en la performance de frenado.</li>
-            <li>Provoca desgaste desparejo en las pastillas de freno.</li>
-          </ul>
-
-          <h3>4. Criterio de trabajo: exceso de kilometraje en servicios</h3>
-          <p>Ante el ingreso de una unidad cuyo kilometraje se haya excedido significativamente conforme al último servicio realizado, se aplica el siguiente criterio oficial de unificación:</p>
-          <table class="modal-table">
-            <thead><tr><th>Caso / Situación</th><th>Servicio correspondiente</th><th>Observación</th></tr></thead>
-            <tbody>
-              <tr><td>Último servicio a los 10.000&nbsp;km, ingresa con 28.000&nbsp;km</td><td>Servicio de 20.000&nbsp;km</td><td>Se realiza a los 28.000&nbsp;km actuales</td></tr>
-              <tr><td>Siguiente mantenimiento (≈40.000&nbsp;km)</td><td>Servicio de 40.000&nbsp;km</td><td>Según el kilometraje que tenga en ese momento</td></tr>
-            </tbody>
-          </table>
-          <p class="modal-note">Efecto sobre el plan: se saltea el Servicio de 30.000&nbsp;km para reordenar el plan de mantenimiento de la unidad.</p>
-
-          <p class="modal-footnote">Este documento resume la política oficial de garantía, mantenimiento y criterios operativos de taller.</p>
-        </div>
+        <div class="modal-body" id="modalPoliticaBody"><p>Cargando…</p></div>
       </div>
     </div>
 
@@ -1499,7 +1483,21 @@ function chatHTML() {
     /* Modal de la Política de Garantía: no dispara ninguna consulta, solo
        muestra el documento — por eso no pasa por sendCard/sendMessage. */
     const modalPolitica = document.getElementById('modalPolitica');
-    function abrirModalPolitica() { modalPolitica.hidden = false; }
+    const modalPoliticaBody = document.getElementById('modalPoliticaBody');
+    let politicaCargada = false;
+
+    async function abrirModalPolitica() {
+      modalPolitica.hidden = false;
+      if (politicaCargada) return;
+      try {
+        const res = await fetch('/politica');
+        const { markdown } = await res.json();
+        modalPoliticaBody.replaceChildren(...renderMarkdownSeguro(markdown));
+        politicaCargada = true;
+      } catch {
+        modalPoliticaBody.innerHTML = '<p>No se pudo cargar el contenido. Probá de nuevo.</p>';
+      }
+    }
     function cerrarModalPolitica() { modalPolitica.hidden = true; }
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !modalPolitica.hidden) cerrarModalPolitica();

@@ -1,13 +1,22 @@
-// Auth del panel admin — GarantIA. Un solo usuario admin, login + sesión.
+// Auth del panel admin — GarantIA. Un solo usuario admin, login + sesión +
+// recuperación de contraseña por email.
 //
-// La password nunca vive en texto plano en ningún lado: ADMIN_PASSWORD_HASH
-// y ADMIN_PASSWORD_SALT son secrets del Worker, calculados una vez a mano
-// (SHA-256(password + salt)) y cargados con `wrangler secret put`.
+// La password nunca vive en texto plano en ningún lado. El hash vigente
+// vive en KV (`admin:password`, `{hash, salt}`) — no como secret del
+// Worker — porque "olvidé mi contraseña" necesita que el propio Worker
+// pueda escribir una password nueva en tiempo de ejecución, y los secrets
+// de `wrangler secret put` son de solo lectura desde el código: no hay
+// binding que permita cambiarlos. `ADMIN_PASSWORD_HASH`/`ADMIN_PASSWORD_SALT`
+// siguen existiendo como secrets, pero solo como semilla inicial: se usan
+// nada más si KV todavía no tiene `admin:password` (antes del primer
+// reseteo, o en un deploy nuevo).
 //
 // La sesión es un token aleatorio en KV con TTL, no una cookie stateless
 // firmada: el proyecto ya usa KV para todo, y así el logout es un simple
 // delete — con HMAC stateless invalidar antes de que expire exigiría de
 // todos modos una blocklist en KV.
+
+import { enviarEmail } from './email_resend.js';
 
 const SESSION_COOKIE = 'admin_session';
 const SESSION_PREFIX = 'admin:session:';
@@ -17,7 +26,21 @@ const LOCKOUT_KEY = 'admin:login:fails';
 const LOCKOUT_TTL_SEGUNDOS = 15 * 60;
 const LOCKOUT_MAX_INTENTOS = 5;
 
+const KV_KEY_PASSWORD = 'admin:password';
+
+const RESET_PREFIX = 'admin:reset:';
+const RESET_TTL_SEGUNDOS = 15 * 60;
+const RESET_MIN_PASSWORD_LEN = 8;
+
+const FORGOT_COUNT_KEY = 'admin:forgot:count';
+const FORGOT_TTL_SEGUNDOS = 15 * 60;
+const FORGOT_MAX_INTENTOS = 3;
+
 const CORS_ADMIN_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+
+// Mensaje genérico, igual exista o no la cuenta: no hay que darle a un
+// atacante una forma de confirmar cuál es el email del admin.
+const MENSAJE_FORGOT_GENERICO = 'Si el email corresponde a la cuenta admin, te llega un link para restablecer la contraseña.';
 
 // ── Hashing y comparación ────────────────────────────────
 
@@ -38,24 +61,46 @@ export function compararEnTiempoConstante(a, b) {
 	return diff === 0;
 }
 
-async function passwordValida(env, passwordIngresada) {
-	if (!env.ADMIN_PASSWORD_HASH || !env.ADMIN_PASSWORD_SALT) return false;
-	const hash = await hashPassword(passwordIngresada, env.ADMIN_PASSWORD_SALT);
-	return compararEnTiempoConstante(hash, env.ADMIN_PASSWORD_HASH);
+async function credencialesVigentes(env) {
+	const crudo = await env.garantia_cache.get(KV_KEY_PASSWORD);
+	if (crudo) {
+		try {
+			return JSON.parse(crudo);
+		} catch {
+			/* cae a la semilla de abajo si KV tiene basura */
+		}
+	}
+	if (env.ADMIN_PASSWORD_HASH && env.ADMIN_PASSWORD_SALT) {
+		return { hash: env.ADMIN_PASSWORD_HASH, salt: env.ADMIN_PASSWORD_SALT };
+	}
+	return null;
 }
 
-// ── Lockout de intentos fallidos ─────────────────────────
+async function passwordValida(env, passwordIngresada) {
+	const credenciales = await credencialesVigentes(env);
+	if (!credenciales) return false;
+	const hash = await hashPassword(passwordIngresada, credenciales.salt);
+	return compararEnTiempoConstante(hash, credenciales.hash);
+}
+
+async function guardarPasswordNueva(env, passwordNueva) {
+	const salt = crypto.randomUUID();
+	const hash = await hashPassword(passwordNueva, salt);
+	await env.garantia_cache.put(KV_KEY_PASSWORD, JSON.stringify({ hash, salt }));
+}
+
+// ── Lockout de intentos fallidos (login) ─────────────────
 // Contador global (no por IP): un solo admin legítimo no necesita el costo
 // extra de trackear IPs, y esto ya frena el escaneo automático de /admin.
 
-async function intentosFallidos(env) {
-	const valor = await env.garantia_cache.get(LOCKOUT_KEY);
+async function contador(env, key) {
+	const valor = await env.garantia_cache.get(key);
 	return valor ? parseInt(valor, 10) || 0 : 0;
 }
 
-async function registrarIntentoFallido(env) {
-	const actual = await intentosFallidos(env);
-	await env.garantia_cache.put(LOCKOUT_KEY, String(actual + 1), { expirationTtl: LOCKOUT_TTL_SEGUNDOS });
+async function incrementarContador(env, key, ttlSegundos) {
+	const actual = await contador(env, key);
+	await env.garantia_cache.put(key, String(actual + 1), { expirationTtl: ttlSegundos });
 }
 
 async function limpiarIntentosFallidos(env) {
@@ -63,7 +108,7 @@ async function limpiarIntentosFallidos(env) {
 }
 
 async function hayLockout(env) {
-	return (await intentosFallidos(env)) >= LOCKOUT_MAX_INTENTOS;
+	return (await contador(env, LOCKOUT_KEY)) >= LOCKOUT_MAX_INTENTOS;
 }
 
 // ── Sesión ────────────────────────────────────────────────
@@ -108,7 +153,7 @@ export async function requireAdminSession(request, env) {
 	return Response.json({ error: 'No autorizado' }, { status: 401, headers: CORS_ADMIN_HEADERS });
 }
 
-// ── Rutas ─────────────────────────────────────────────────
+// ── Rutas: login / logout ─────────────────────────────────
 
 export async function manejarLogin(request, env) {
 	if (await hayLockout(env)) {
@@ -123,20 +168,80 @@ export async function manejarLogin(request, env) {
 	}
 
 	if (typeof password !== 'string' || !(await passwordValida(env, password))) {
-		await registrarIntentoFallido(env);
+		await incrementarContador(env, LOCKOUT_KEY, LOCKOUT_TTL_SEGUNDOS);
 		return Response.json({ error: 'Password incorrecta' }, { status: 401, headers: CORS_ADMIN_HEADERS });
 	}
 
 	await limpiarIntentosFallidos(env);
 	const token = await crearSesion(env);
-	return Response.json(
-		{ ok: true },
-		{ status: 200, headers: { ...CORS_ADMIN_HEADERS, 'Set-Cookie': cookieSesion(token) } }
-	);
+	return Response.json({ ok: true }, { status: 200, headers: { ...CORS_ADMIN_HEADERS, 'Set-Cookie': cookieSesion(token) } });
 }
 
 export async function manejarLogout(request, env) {
 	const token = leerCookie(request, SESSION_COOKIE);
 	await destruirSesion(env, token);
 	return Response.json({ ok: true }, { status: 200, headers: { ...CORS_ADMIN_HEADERS, 'Set-Cookie': cookieLogout() } });
+}
+
+// ── Rutas: olvidé mi contraseña ───────────────────────────
+
+export async function manejarForgotPassword(request, env) {
+	let email;
+	try {
+		({ email } = await request.json());
+	} catch {
+		return Response.json({ error: 'Body inválido' }, { status: 400, headers: CORS_ADMIN_HEADERS });
+	}
+
+	// Límite de envíos por ventana: el email del admin es un recurso real
+	// (buzón, cuota de Resend), no algo que dejar golpear sin freno.
+	if ((await contador(env, FORGOT_COUNT_KEY)) >= FORGOT_MAX_INTENTOS) {
+		return Response.json({ ok: true, mensaje: MENSAJE_FORGOT_GENERICO }, { status: 200, headers: CORS_ADMIN_HEADERS });
+	}
+	await incrementarContador(env, FORGOT_COUNT_KEY, FORGOT_TTL_SEGUNDOS);
+
+	const coincide = typeof email === 'string' && env.ADMIN_EMAIL && email.trim().toLowerCase() === env.ADMIN_EMAIL.trim().toLowerCase();
+
+	if (coincide) {
+		const token = crypto.randomUUID();
+		await env.garantia_cache.put(RESET_PREFIX + token, '1', { expirationTtl: RESET_TTL_SEGUNDOS });
+
+		const origen = new URL(request.url).origin;
+		const link = `${origen}/admin?reset=${token}`;
+
+		await enviarEmail(env, {
+			to: env.ADMIN_EMAIL,
+			subject: 'Restablecer tu contraseña de GarantIA',
+			html: `<p>Pediste restablecer la contraseña del panel admin de GarantIA.</p>
+<p><a href="${link}">Elegir una contraseña nueva</a></p>
+<p>El link vence en 15 minutos. Si no fuiste vos, ignorá este mail — la contraseña actual sigue funcionando.</p>`,
+		});
+	}
+
+	// Misma respuesta exista o no la cuenta, y aunque el envío falle: no hay
+	// que delatar por el código de estado si el email coincidía.
+	return Response.json({ ok: true, mensaje: MENSAJE_FORGOT_GENERICO }, { status: 200, headers: CORS_ADMIN_HEADERS });
+}
+
+export async function manejarResetPassword(request, env) {
+	let token, password;
+	try {
+		({ token, password } = await request.json());
+	} catch {
+		return Response.json({ error: 'Body inválido' }, { status: 400, headers: CORS_ADMIN_HEADERS });
+	}
+
+	if (typeof token !== 'string' || !(await env.garantia_cache.get(RESET_PREFIX + token))) {
+		return Response.json({ error: 'El link venció o ya se usó. Pedí uno nuevo.' }, { status: 400, headers: CORS_ADMIN_HEADERS });
+	}
+
+	if (typeof password !== 'string' || password.length < RESET_MIN_PASSWORD_LEN) {
+		return Response.json({ error: `La contraseña tiene que tener al menos ${RESET_MIN_PASSWORD_LEN} caracteres` }, { status: 400, headers: CORS_ADMIN_HEADERS });
+	}
+
+	await guardarPasswordNueva(env, password);
+	await env.garantia_cache.delete(RESET_PREFIX + token); // un solo uso
+	await limpiarIntentosFallidos(env);
+
+	return Response.json({ ok: true }, { status: 200, headers: CORS_ADMIN_HEADERS });
 }

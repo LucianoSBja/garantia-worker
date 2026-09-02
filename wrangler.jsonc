@@ -10,6 +10,9 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	"vars": {
+		"ADMIN_EMAIL": "garantiasdyv@gmail.com"
+	},
 	"vectorize": [
 		{
 			"binding": "VECTORIZE",

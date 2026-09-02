@@ -15,10 +15,16 @@
 // job vaciara el cupo compartido con el chat en vivo, haría esperar a un
 // técnico — exactamente lo que GeminiRateLimiter existe para evitar del
 // lado del chat. Pacing lento tipo CLI (ver src/ingest.js).
+//
+// docs:index se escribe en tres momentos, no solo al terminar: 'pendiente'
+// al iniciar (nombre, chunks totales y datos de Drive ya se conocen ahí),
+// 'indexado' al finalizar, 'error' si el job se cae. Así la tabla del panel
+// puede mostrar el estado real de un documento sin depender de que el
+// admin tenga la pestaña abierta mirando el polling del job.
 
 import { chunkearPorNombreDeArchivo } from './chunking.js';
 import { subirOActualizarArchivo } from './drive_worker.js';
-import { leerIndice, actualizarIndice } from './docs_index.js';
+import { leerIndice, actualizarIndice, leerMapaUrls, actualizarMapaUrls, extraerDriveFileId } from './docs_index.js';
 
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GEMINI_EMBED_MODEL = 'gemini-embedding-001';
@@ -30,7 +36,12 @@ const PACING_MS = 700;
 const ESPERA_BASE_MS = 5000;
 const REINTENTOS_CHUNK_MAX = 5;
 
-const KV_KEY_DOCS_URLS = 'docs:urls';
+// Backfill de documentos subidos por la CLI antes de que existiera el panel
+// (no tienen entrada en docs:index): probar en lotes cuántos chunks existen
+// de verdad en Vectorize, para poder borrar los huérfanos si el reemplazo
+// tiene menos contenido. Acotado — ver contarChunksExistentes().
+const LOTE_PROBE = 50;
+const MAX_CHUNKS_PROBE = 400;
 
 export function sanitizarNombre(fileName) {
 	return fileName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40);
@@ -60,6 +71,28 @@ async function embedChunk(env, texto) {
 	const data = await res.json();
 	if (!data.embedding?.values) throw new Error('Error embedding: ' + JSON.stringify(data));
 	return data.embedding.values;
+}
+
+// Cuenta cuántos chunks de fileName existen realmente en Vectorize, probando
+// IDs determinísticos en lotes hasta encontrar el primer hueco. Se usa solo
+// cuando docs:index no tiene la entrada (documento subido por la CLI, nunca
+// tocado desde el panel) — con panel-uploads el conteo ya se conoce.
+async function contarChunksExistentes(env, fileName) {
+	let total = 0;
+	for (let inicio = 0; inicio < MAX_CHUNKS_PROBE; inicio += LOTE_PROBE) {
+		const cantidad = Math.min(LOTE_PROBE, MAX_CHUNKS_PROBE - inicio);
+		const ids = Array.from({ length: cantidad }, (_, i) => idDeChunk(fileName, inicio + i));
+		const encontrados = new Set((await env.VECTORIZE.getByIds(ids)).map((v) => v.id));
+
+		let contiguos = 0;
+		for (const id of ids) {
+			if (!encontrados.has(id)) break;
+			contiguos++;
+		}
+		total += contiguos;
+		if (contiguos < ids.length) break;
+	}
+	return total;
 }
 
 export class IngestJob {
@@ -105,7 +138,22 @@ export class IngestJob {
 		}
 
 		const indice = await leerIndice(this.env);
-		const entradaAnterior = indice[fileName] || null;
+		let entradaAnterior = indice[fileName] || null;
+
+		// Backfill: el archivo ya está en el corpus (docs:urls lo tiene) pero
+		// nunca pasó por el panel, así que no hay entrada en docs:index. Se
+		// reconstruye lo necesario para que el reemplazo actualice el mismo
+		// archivo de Drive en vez de crear uno duplicado.
+		if (!entradaAnterior) {
+			const urls = await leerMapaUrls(this.env);
+			if (urls[fileName]) {
+				const driveFileId = extraerDriveFileId(urls[fileName]);
+				const chunksPrevios = await contarChunksExistentes(this.env, fileName);
+				if (driveFileId || chunksPrevios > 0) {
+					entradaAnterior = { driveFileId, driveUrl: urls[fileName], chunks: chunksPrevios };
+				}
+			}
+		}
 
 		let driveInfo;
 		try {
@@ -119,6 +167,17 @@ export class IngestJob {
 		} catch (err) {
 			return Response.json({ error: 'Falló la subida a Drive: ' + err.message }, { status: 502 });
 		}
+
+		const ahora = new Date().toISOString();
+		await actualizarIndice(this.env, fileName, {
+			estado: 'pendiente',
+			chunks: chunks.length,
+			driveFileId: driveInfo.driveFileId,
+			driveUrl: driveInfo.driveUrl,
+			subidoEl: ahora,
+			indexadoEl: null,
+			error: null,
+		});
 
 		const job = {
 			estado: 'embedding',
@@ -149,6 +208,12 @@ export class IngestJob {
 			nextIndex: job.nextIndex,
 			total: job.total,
 			error: job.error,
+			// driveFileId/driveUrl ya se conocen desde iniciar() (Drive se sube
+			// antes de crear el job, ver arriba) — el panel los necesita para el
+			// overlay optimista de la tabla, así el botón de preview no queda
+			// deshabilitado mientras docs:index en KV todavía no propagó.
+			driveFileId: job.driveFileId,
+			driveUrl: job.driveUrl,
 		});
 	}
 
@@ -161,6 +226,7 @@ export class IngestJob {
 		job.error = null;
 		job.intentosChunkActual = 0;
 		await this.state.storage.put('job', job);
+		await actualizarIndice(this.env, job.fileName, { estado: 'pendiente', error: null });
 		await this.state.storage.setAlarm(Date.now() + 10);
 		return Response.json({ ok: true, nextIndex: job.nextIndex, total: job.total });
 	}
@@ -207,6 +273,7 @@ export class IngestJob {
 			job.error = err.message;
 			job.terminadoEl = Date.now();
 			await this.state.storage.put('job', job);
+			await actualizarIndice(this.env, job.fileName, { estado: 'error', error: err.message });
 			// Sin reprogramar alarma a propósito: el job queda en 'error' hasta
 			// que el admin pida /reintentar. Dejar que Cloudflare reintente solo
 			// agotaría sus 6 reintentos nativos y apagaría la alarma para siempre.
@@ -222,16 +289,13 @@ export class IngestJob {
 			}
 
 			await actualizarIndice(this.env, job.fileName, {
+				estado: 'indexado',
 				chunks: job.total,
 				driveFileId: job.driveFileId,
 				driveUrl: job.driveUrl,
-				subidoEl: new Date().toISOString(),
+				indexadoEl: new Date().toISOString(),
 			});
-
-			const crudo = await this.env.garantia_cache.get(KV_KEY_DOCS_URLS);
-			const urls = crudo ? JSON.parse(crudo) : {};
-			urls[job.fileName] = job.driveUrl;
-			await this.env.garantia_cache.put(KV_KEY_DOCS_URLS, JSON.stringify(urls));
+			await actualizarMapaUrls(this.env, job.fileName, job.driveUrl);
 
 			job.estado = 'done';
 			job.terminadoEl = Date.now();
@@ -241,6 +305,7 @@ export class IngestJob {
 			job.error = 'Falló al finalizar: ' + err.message;
 			job.terminadoEl = Date.now();
 			await this.state.storage.put('job', job);
+			await actualizarIndice(this.env, job.fileName, { estado: 'error', error: job.error });
 		}
 	}
 }
