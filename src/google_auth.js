@@ -9,6 +9,7 @@ import { createServer } from "http";
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { fileURLToPath } from "url";
+import { getAccessToken as getAccessTokenShared } from "./shared/google_oauth.js";
 
 const CLIENT_ID     = process.env.GOOGLE_OAUTH_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
@@ -47,20 +48,10 @@ async function exchangeCode(code) {
 }
 
 // Exportada porque la ingesta va a necesitar lo mismo para renovar el access token.
+// La implementación real vive en shared/google_oauth.js (sin imports de Node,
+// portable al Worker); acá solo se le pasan las credenciales de este proceso.
 export async function getAccessToken(refreshToken = REFRESH_TOKEN) {
-  const res = await fetch(TOKEN_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      refresh_token: refreshToken,
-      client_id:     CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      grant_type:    "refresh_token",
-    }),
-  });
-  const data = await res.json();
-  if (!data.access_token) throw new Error("No se pudo renovar el access token: " + JSON.stringify(data));
-  return data.access_token;
+  return getAccessTokenShared({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, refreshToken });
 }
 
 // ── Flujo interactivo ─────────────────────────────────────────────────────────

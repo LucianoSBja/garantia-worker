@@ -29,12 +29,19 @@ node src/ingest_file.js "docs/ARCHIVO.pdf" # un solo archivo
 
 ## Arquitectura
 
-Cuatro archivos en `src/`, sin build step:
+Sin build step. En `src/`:
 
-- **`src/index.js`** — el Worker entero (~820 líneas): rutas, pipeline RAG y la UI de chat completa devuelta como string desde `chatHTML()` (HTML + CSS + JS inline, sin frontend separado ni assets).
+- **`src/index.js`** — el Worker: rutas, pipeline RAG, la UI de chat (`chatHTML()`) y las rutas del panel admin.
+- **`src/admin_html.js`** — la UI del panel admin (`adminHTML()`), mismo patrón que `chatHTML()`: un template string con `<style>`/`<script>` inline, sin build ni assets separados.
+- **`src/admin_auth.js`** — login y sesión del panel admin.
+- **`src/ingest_job_do.js`** — Durable Object `IngestJob`, el job de ingesta en background que dispara el panel admin.
+- **`src/drive_worker.js`** — subida/reemplazo/borrado en Drive desde el Worker (versión fetch-based de `drive_upload.js`, para el panel).
+- **`src/docs_index.js`** — índice KV de qué archivos subió el panel (`docs:index`).
+- **`src/chunking.js`** — chunking para el panel admin (ver "Panel admin" más abajo, por qué es una tercera copia).
+- **`src/shared/google_oauth.js`** — `getAccessToken()`, portable a Node y a Workers (sin imports de `http`/`child_process`).
 - **`src/ingest.js`** / **`src/ingest_file.js`** — scripts Node que parsean documentos, chunkean, embeben y hacen upsert a Vectorize vía la REST API de Cloudflare. **Duplican la misma lógica a propósito** (parsers, `chunkText`, `getEmbedding`, `upsertVectors`, filtro de VIN, constantes de modelo): un cambio en uno casi siempre debe replicarse en el otro y, si toca embeddings, también en `index.js`.
-- **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. Exporta `getAccessToken()`; solo dispara el flujo interactivo si se lo invoca directamente, porque `drive_upload.js` lo importa.
-- **`src/drive_upload.js`** — sube los documentos a Drive y escribe el mapa nombre → URL en la clave `docs:urls` de KV. Qué está ya subido lo pregunta a Drive, no a un archivo local: Drive admite nombres repetidos en una carpeta, así que un registro de estado perdido haría subir el corpus entero de nuevo y dejaría 207 duplicados.
+- **`src/google_auth.js`** — flujo OAuth de Google Drive, se corre una vez a mano para obtener el refresh token. Reexporta `getAccessToken()` desde `shared/google_oauth.js`; solo dispara el flujo interactivo si se lo invoca directamente, porque `drive_upload.js` lo importa.
+- **`src/drive_upload.js`** — sube los documentos a Drive (desde la terminal, corpus completo) y escribe el mapa nombre → URL en la clave `docs:urls` de KV. Qué está ya subido lo pregunta a Drive, no a un archivo local: Drive admite nombres repetidos en una carpeta, así que un registro de estado perdido haría subir el corpus entero de nuevo y dejaría 207 duplicados.
 
 ### Links a Drive
 
@@ -56,7 +63,65 @@ La salida del modelo **nunca** va directo a `innerHTML`: marked deja pasar HTML 
 
 El filtro borra **todos** los atributos salvo `href` de un `<a>` http(s), así que no hay lista negra de `on*` que mantener. Al agregar una etiqueta nueva al allowlist, pensar qué atributos habilita: la lógica falla cerrada, y romper eso es la única forma de reabrir el agujero.
 
-Rutas: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Todo lo demás → 404.
+Rutas del chat: `POST /chat`, `GET /health`, `GET /` (sirve la UI). Rutas del panel admin, ver más abajo. Todo lo demás → 404.
+
+## Panel admin
+
+Login propio en `/admin` para subir, reemplazar y borrar documentos del índice sin pasar por la terminal — antes esto era exclusivamente `node src/ingest.js`/`ingest_file.js` a mano.
+
+### El parseo corre en el navegador, no en el Worker
+
+La cuenta de Cloudflare está en el **plan Free**, no Paid (la suposición inicial de que estaba en Paid, basada en que `GEMINI_LIMITER` usa un Durable Object con SQLite, era incorrecta — SQLite en Durable Objects ya está disponible en Free). El plan Free tiene **10ms de CPU por request, fijo, no configurable** (`wrangler deploy` con `limits.cpu_ms` falla directamente: *"CPU limits are not supported for the Free plan"*).
+
+Medido en un spike contra producción: un PDF chico (108KB) parseaba server-side con `pdf2json` sin problema y daba el mismo texto que la CLI. Un PDF real del corpus de 13MB (`docs/COROLLA/Ruido Anormal Susp. Delantera - Corolla Cross.pdf`) tiraba **503 — "Exceeded CPU Limit"**, confirmado con `wrangler tail`. El corpus tiene archivos de hasta ~15MB, así que no es un caso límite raro.
+
+Por eso el parseo (PDF/DOCX/XLSX/PPTX → texto) vive **en el navegador del admin**, adentro de `adminHTML()` (`src/admin_html.js`), con las mismas librerías que usa la CLI pero cargadas por CDN (mismo patrón que `chatHTML()` con `marked`): `pdf.js`, `mammoth.browser`, `xlsx` (SheetJS), `jszip`. El navegador no tiene el límite de CPU de Cloudflare. Solo el **texto ya extraído** viaja al Worker (en el mismo `multipart/form-data` que el archivo original, que se necesita aparte para subir a Drive) — el Worker nunca vuelve a tocar el binario para parsearlo, solo lo reenvía a Drive.
+
+Efecto colateral: el Worker no tiene ninguna dependencia de `pdf2json`/`mammoth`/`xlsx`/`jszip` en su bundle — bajó de ~2.26MB a ~93KB al sacarlas (medido).
+
+**Tres bugs de integración encontrados en el spike server-side** (documentados por si algún día se reconsidera parsear en el Worker, ej. pasando a plan Paid — no son relevantes para el parseo client-side actual, pero costaron medición y se pierden fácil):
+- `createRequire(import.meta.url)` (como usa `pdf2json` en los scripts CLI) **falla en el pipeline de deploy de Workers** — `import.meta.url` no se resuelve ahí. Hace falta el import ESM directo.
+- `mammoth` tiene un campo `"browser"` en su `package.json` que el bundler de Wrangler resuelve solo, targeteando una plataforma tipo browser. Esa variante **solo acepta `{ arrayBuffer }`**, no `{ buffer }` — pasar `{ buffer }` falla en silencio con "Could not find file in options", sin delatar la causa.
+- `pdf2json` cachea su implementación de `createObjectURL` en un IIFE de nivel de módulo, evaluado una sola vez al importar. workerd tiene `URL.createObjectURL` como *stub* (existe, pero explota al llamarla) — neutralizar la propiedad tiene que pasar en un módulo importado ANTES que `pdf2json`, no en el handler de la request.
+
+**El orden de lectura de `pdf.js` tampoco es gratis.** `getTextContent()` por sí solo alcanza para documentos simples, pero probado contra un boletín real (ABI-511) salía con el pie de página legal primero — el mismo bug que tenía `pdf2json` sin `ordenarPagina()` (ver más abajo, sección Ingesta). `parsePdfBrowser()` en `admin_html.js` reordena por coordenadas usando `item.transform` (pdf.js da `[a,b,c,d,x,y]`; el eje Y crece hacia arriba, al revés que pantalla), mismo criterio que `ordenarPagina()`. Verificado con Playwright contra el ABI-511 real: el header (modelo, N° de boletín, tema, fecha) vuelve a salir primero.
+
+### Auth: login propio, sin servicios externos
+
+`src/admin_auth.js`. Password nunca en texto plano en ningún lado: `ADMIN_PASSWORD_HASH` y `ADMIN_PASSWORD_SALT` son secrets (`SHA-256(password + salt)`, calculado una vez a mano). Sesión: token aleatorio + KV con TTL de 12h (`admin:session:<token>`), no cookie HMAC-firmada stateless — el proyecto ya usa KV para todo, y así el logout es un simple `delete`. Lockout de intentos fallidos: contador global en KV (`admin:login:fails`, 5 intentos, TTL 15 min) — no por IP, un solo admin legítimo no lo necesita, pero frena el escaneo automático de `/admin`.
+
+### Job de ingesta en background: Durable Object singleton `IngestJob`
+
+`src/ingest_job_do.js`. Cientos de embeddings con pacing entre cada uno suman minutos — no entra en una sola request/response, y mantener la conexión HTTP abierta ese tiempo es frágil. Instancia única (`idFromName('current')`, mismo patrón que `GeminiRateLimiter`): el propio DO sabe si ya hay un job corriendo y rechaza uno nuevo (409).
+
+`alarm()` procesa **un chunk por tick** y reprograma la siguiente alarma **desde dentro del propio try/catch**, antes de retornar. Es a propósito: si `alarm()` deja escapar una excepción, Cloudflare reintenta con backoff (2s, hasta 6 veces) y **después deja de disparar la alarma para siempre** (confirmado contra la doc vigente de Durable Objects Alarms). Un 429 de Gemini es esperable y no puede depender de esa red de seguridad — se maneja con reintento propio (`REINTENTOS_CHUNK_MAX`), y agotados los reintentos el job pasa a `error` sin reprogramar nada, a la espera de `/admin/api/upload/retry`.
+
+**Rate limiting propio, desacoplado de `GEMINI_LIMITER` a propósito**: si el job vaciara el cupo `embed` compartido con el chat en vivo, haría esperar a un técnico — exactamente lo que `GeminiRateLimiter` existe para evitar. El job mantiene su propio pacing lento (`PACING_MS = 700`, igual que `PAUSA_MS` en la CLI), sin tocar el balde del chat. Deuda conocida: comparten la misma `GOOGLE_API_KEY`, así que el desacople es de rate-limiter de la app, no de cuota real de Google.
+
+**Drive se sube al iniciar el job, no al terminar.** El storage de un Durable Object SQLite tiene un límite de **2MB combinados por key+value** — un archivo de 15MB no entra ahí de ninguna forma. La subida a Drive (I/O, no CPU) pasa en `iniciar()`, antes de crear el job; el job en sí solo guarda los chunks de texto (livianos) y el `driveFileId`/`driveUrl` ya resueltos.
+
+**Reemplazo**: si `docs:index[fileName]` ya existe, el upload lo trata como reemplazo — mismos IDs de Vectorize por índice de chunk (`upsert` sobreescribe solo), y el contenido en Drive se actualiza en el mismo archivo (mismo `fileId`, mismo link, vía `PATCH .../files/{id}?uploadType=resumable`) en vez de crear uno nuevo. Si el archivo nuevo tiene **menos** chunks que el viejo, `finalizar()` borra los IDs huérfanos con `deleteByIds` — el conteo exacto lo tiene `docs:index`, así que no hace falta el trial-and-error que sí necesita la CLI (ver Ingesta).
+
+### `docs:index`: qué hay subido desde el panel
+
+`src/docs_index.js`. Vectorize no tiene forma de listar por `source` (no hay metadata index creado, ver Ingesta más abajo) — el panel mantiene su propio registro en una clave KV (`docs:index`, mismo patrón que `docs:urls`): `{ [fileName]: { chunks, driveFileId, driveUrl, subidoEl } }`.
+
+**No incluye los ~207 documentos del corpus original**, subidos por la CLI antes de que existiera el panel — `docs:index` arranca vacío y solo trackea lo que pasó por acá. Si el admin "reemplaza" desde el panel un documento que ya estaba en el corpus original, el panel no encuentra `driveFileId` previo y crea un archivo nuevo en Drive (con el mismo nombre — Drive permite duplicados) en vez de actualizar el original. `docs:urls` sí se actualiza a la URL nueva (así el chat linkea la versión vigente), pero el archivo viejo queda huérfano en Drive. Deuda conocida, mismo criterio que el resto del proyecto: no se oculta. Un backfill de `docs:index` a partir de `docs:urls` + reconstrucción de conteo de chunks resolvería esto, pendiente.
+
+### Rutas
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /admin` | Sirve `adminHTML()` (pública; el JS decide login-vs-dashboard según `GET /admin/api/files`) |
+| `POST /admin/login` | `{password}` → cookie de sesión, 401, o 429 si hay lockout |
+| `POST /admin/logout` | Borra la sesión, limpia cookie |
+| `GET /admin/api/files` | `docs:index` + estado del job actual (protegida) |
+| `POST /admin/api/upload` | `multipart/form-data` (`fileName`, `mimeType`, `text`, `file`); 409 si ya hay un job corriendo (protegida) |
+| `GET /admin/api/upload/status` | Polling del job actual/último (protegida) |
+| `POST /admin/api/upload/retry` | Reintenta el último job si quedó en `error` (protegida) |
+| `POST /admin/api/files/:fileName/delete` | Borra de Vectorize, Drive (best-effort) y los índices KV (protegida) |
+
+Todas las protegidas pasan por `requireAdminSession()`, un único helper — nada de auth ad-hoc por handler. Las rutas de upload/status/retry son delgadas: reenvían la request directo al Durable Object (`env.INGEST_JOB.get(idFromName('current')).fetch(...)`), que hace todo el trabajo real.
 
 ### Flujo de `handleChat`
 
@@ -196,8 +261,12 @@ Tres lugares distintos, cada uno con su consumidor:
 | Archivo | Lo lee | Variables |
 |---|---|---|
 | `.env` | scripts Node de ingesta (`source .env`) | `CF_ACCOUNT_ID`, `CF_API_TOKEN`, `GOOGLE_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
-| `.dev.vars` | `wrangler dev` | `GOOGLE_API_KEY` |
-| `wrangler secret put` | Worker en producción | `GOOGLE_API_KEY` |
+| `.dev.vars` | `wrangler dev` | `GOOGLE_API_KEY`, `ADMIN_PASSWORD_HASH`, `ADMIN_PASSWORD_SALT`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` |
+| `wrangler secret put` | Worker en producción | Las mismas seis que `.dev.vars` |
+
+Los tres `GOOGLE_OAUTH_*`/`GOOGLE_REFRESH_TOKEN` viven duplicados entre `.env` (CLI) y `.dev.vars`/producción (panel admin, para subir a Drive desde el Worker) — mismo valor, dos consumidores con acceso a `process.env` vs. `env.*` distintos.
+
+`ADMIN_PASSWORD_HASH`/`ADMIN_PASSWORD_SALT` se generan una sola vez a mano: `SHA-256(password + salt)` en hex, con Web Crypto (`crypto.subtle.digest`) — nunca la password en texto plano en ningún archivo. Cambiar la password del panel implica regenerar y volver a cargar ambos secrets con `wrangler secret put`.
 
 Los tres están gitignoreados o fuera del repo. Agregar un secret nuevo suele implicar tocar los tres.
 
@@ -207,9 +276,11 @@ Los tres están gitignoreados o fuera del repo. Agregar un secret nuevo suele im
 
 Los tests en `test/unit/` mockean todo el borde externo: `vi.stubGlobal('fetch', ...)` ruteando por `:embedContent` / `:generateContent`, más objetos falsos para `env.VECTORIZE` y `env.garantia_cache`. Al agregar una llamada externa nueva, extender el router de fetch en el helper `mockFetch`.
 
+Del panel admin: `adminAuth.spec.js` (hash/compare/cookie/lockout), `ingestJob.spec.js` (la clase `IngestJob` con `state.storage` falso — `Map` en memoria — y el mismo router de `fetch` para Gemini/Drive/OAuth), `chunking.spec.js` (la copia de chunking del Worker, primera vez que esta lógica tiene tests automatizados en el proyecto). **Los parsers client-side de `admin_html.js` no tienen test automatizado** — no hay infraestructura de tests de browser en el proyecto; se verifican a mano/con Playwright ad-hoc contra archivos reales del corpus, igual que el resto del pipeline de retrieval.
+
 ## Desarrollo local
 
-`wrangler dev` a secas **falla** con `Binding VECTORIZE needs to be run remotely` — Vectorize no se emula en Miniflare. Hace falta `wrangler dev --remote`, que a su vez requiere OAuth completo vía `wrangler login` (un `CLOUDFLARE_API_TOKEN` en el entorno no alcanza). Si no hay sesión interactiva disponible, la alternativa práctica es validar cada llamada por separado con `curl` (Gemini embed, Gemini generate, Vectorize query) y apoyarse en los unit tests.
+`wrangler dev` a secas **falla** con `Binding VECTORIZE needs to be run remotely` — Vectorize no se emula en Miniflare. Hace falta `wrangler dev --remote`, que a su vez requiere OAuth completo vía `wrangler login` (un `CLOUDFLARE_API_TOKEN` en el entorno no alcanza). Si no hay sesión interactiva disponible, la alternativa práctica es validar cada llamada por separado con `curl` (Gemini embed, Gemini generate, Vectorize query) y apoyarse en los unit tests — o, para cosas que solo se pueden ver en producción (el panel admin completo, el parseo client-side), desplegar y probar contra la URL real, revirtiendo si algo sale mal.
 
 ## Estilo
 

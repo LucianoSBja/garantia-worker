@@ -27,6 +27,10 @@
 			{
 				"name": "GEMINI_LIMITER",
 				"class_name": "GeminiRateLimiter"
+			},
+			{
+				"name": "INGEST_JOB",
+				"class_name": "IngestJob"
 			}
 		]
 	},
@@ -34,6 +38,10 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["GeminiRateLimiter"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["IngestJob"]
 		}
 	]
 }

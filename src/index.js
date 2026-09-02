@@ -1,3 +1,49 @@
+import { manejarLogin, manejarLogout, requireAdminSession } from './admin_auth.js';
+import { leerIndice, eliminarDeIndice } from './docs_index.js';
+import { borrarArchivo } from './drive_worker.js';
+import { sanitizarNombre } from './ingest_job_do.js';
+export { IngestJob } from './ingest_job_do.js';
+import { adminHTML } from './admin_html.js';
+
+function ingestJobStub(env) {
+	return env.INGEST_JOB.get(env.INGEST_JOB.idFromName('current'));
+}
+
+export async function borrarDocumento(env, fileName) {
+	const indice = await leerIndice(env);
+	const entrada = indice[fileName];
+	if (!entrada) {
+		return Response.json({ error: 'No se encontró ese archivo en el índice' }, { status: 404, headers: CORS_HEADERS });
+	}
+
+	const ids = [];
+	for (let i = 0; i < entrada.chunks; i++) ids.push(`${sanitizarNombre(fileName)}-${i}`);
+	if (ids.length > 0) await env.VECTORIZE.deleteByIds(ids);
+
+	if (entrada.driveFileId) {
+		try {
+			await borrarArchivo(env, entrada.driveFileId);
+		} catch (err) {
+			// Best-effort: si Drive falla, igual sacamos el documento de Vectorize
+			// y del índice — que quede huérfano en Drive es mejor que dejarlo
+			// buscable en el chat. Mismo criterio que el resto del proyecto: se
+			// loguea, no se oculta.
+			console.error('No se pudo borrar de Drive (se sigue igual):', err.message);
+		}
+	}
+
+	await eliminarDeIndice(env, fileName);
+
+	const crudo = await env.garantia_cache.get('docs:urls');
+	if (crudo) {
+		const urls = JSON.parse(crudo);
+		delete urls[fileName];
+		await env.garantia_cache.put('docs:urls', JSON.stringify(urls));
+	}
+
+	return Response.json({ ok: true }, { headers: CORS_HEADERS });
+}
+
 const SYSTEM_PROMPT = `Sos GarantIA, asistente de garantías Toyota del taller Derka y Vargas, Sáenz Peña.
 
 ## CUÁNDO REPREGUNTAR Y CUÁNDO NO
@@ -370,6 +416,63 @@ export default {
 
 		if (url.pathname === '/chat' && request.method === 'POST') {
 			return handleChat(request, env);
+		}
+
+		if (url.pathname === '/admin/login' && request.method === 'POST') {
+			return manejarLogin(request, env);
+		}
+
+		if (url.pathname === '/admin/logout' && request.method === 'POST') {
+			return manejarLogout(request, env);
+		}
+
+		if (url.pathname === '/admin') {
+			return new Response(adminHTML(), {
+				headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', ...CORS_HEADERS },
+			});
+		}
+
+		if (url.pathname === '/admin/api/files' && request.method === 'GET') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			const indice = await leerIndice(env);
+			const estadoJob = await (await ingestJobStub(env).fetch('https://ingest-job/estado')).json();
+			return Response.json({ archivos: indice, job: estadoJob }, { headers: CORS_HEADERS });
+		}
+
+		if (url.pathname === '/admin/api/upload' && request.method === 'POST') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			return ingestJobStub(env).fetch('https://ingest-job/iniciar', {
+				method: 'POST',
+				headers: request.headers,
+				body: request.body,
+				duplex: 'half',
+			});
+		}
+
+		if (url.pathname === '/admin/api/upload/status' && request.method === 'GET') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			return ingestJobStub(env).fetch('https://ingest-job/estado');
+		}
+
+		if (url.pathname === '/admin/api/upload/retry' && request.method === 'POST') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			return ingestJobStub(env).fetch('https://ingest-job/reintentar', { method: 'POST' });
+		}
+
+		if (url.pathname.startsWith('/admin/api/files/') && url.pathname.endsWith('/delete') && request.method === 'POST') {
+			const noAuth = await requireAdminSession(request, env);
+			if (noAuth) return noAuth;
+
+			const fileName = decodeURIComponent(url.pathname.slice('/admin/api/files/'.length, -'/delete'.length));
+			return borrarDocumento(env, fileName);
 		}
 
 		if (url.pathname === '/health') {
